@@ -55,7 +55,7 @@ export function VariableChipInput({
       <div
         ref={containerRef}
         className={cn(
-          "min-h-[40px] w-full border rounded-lg bg-white p-2 flex flex-wrap gap-2 items-center cursor-text transition-colors",
+          "min-h-[40px] w-full border rounded-lg bg-white p-2 flex flex-wrap gap-2 items-center justify-start cursor-text transition-colors",
           isFocused
             ? "border-[#1e4aa9] border-2 ring-2 ring-[#1e4aa9]/20"
             : "border-black/20",

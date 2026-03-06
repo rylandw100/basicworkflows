@@ -894,9 +894,10 @@ export default function Home() {
                         + Add variable
                       </Button>
                     </div>
-                    <StyledTextarea
+                    <ChipTextarea
                       id="prompt-textarea"
                       value={promptMessage}
+                      availableSteps={getAvailableSteps(selectedNode, outputFormat, jsonProperties)}
                       onChange={(text) => {
                         setPromptMessage(text);
                         const textarea = document.getElementById("prompt-textarea");
@@ -1444,9 +1445,10 @@ export default function Home() {
                             + Add variable
                           </Button>
                         </div>
-                        <StyledTextarea
+                        <ChipTextarea
                           id="sms-message"
                           value={smsMessage}
+                          availableSteps={getAvailableSteps(selectedNode, outputFormat, jsonProperties)}
                           onChange={(text) => {
                             setSmsMessage(text);
                             const textarea = document.getElementById("sms-message");
@@ -2700,10 +2702,23 @@ export default function Home() {
           onMouseDown={(e) => {
             // Stop propagation to prevent textarea from receiving mousedown events
             e.stopPropagation();
+            if (e.nativeEvent && typeof e.nativeEvent.stopImmediatePropagation === 'function') {
+              e.nativeEvent.stopImmediatePropagation();
+            }
           }}
           onClick={(e) => {
             // Stop propagation to prevent textarea from receiving click events
             e.stopPropagation();
+            if (e.nativeEvent && typeof e.nativeEvent.stopImmediatePropagation === 'function') {
+              e.nativeEvent.stopImmediatePropagation();
+            }
+          }}
+          onMouseDownCapture={(e) => {
+            // Prevent clicks inside the popover from closing it
+            e.stopPropagation();
+            if (e.nativeEvent && typeof e.nativeEvent.stopImmediatePropagation === 'function') {
+              e.nativeEvent.stopImmediatePropagation();
+            }
           }}
         >
           <VariableDropdown
@@ -2712,6 +2727,7 @@ export default function Home() {
             initialSearchQuery={variableSearchQuery}
             hideSearchInput={openedViaHotkey}
             openedViaHotkey={openedViaHotkey}
+            breadcrumbMode={workflowOption === "opt1"}
             onSelect={(variables) => {
               if (variables.length > 0) {
                 const currentText = pickerContext === "sms" ? smsMessage : promptMessage;
