@@ -3,9 +3,14 @@
 import { useState, useEffect, useRef, useMemo, Fragment } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Card } from "@/components/ui/card";
 import { VariablePath } from "@/components/variable-picker";
 import { VariableChipInput } from "@/components/variable-chip-input";
 import { VariableDropdown } from "@/components/variable-dropdown";
@@ -26,12 +31,16 @@ import {
   X,
   GripVertical,
   AlertTriangle,
+  Sparkles,
+  ArrowUp,
+  Pencil,
 } from "lucide-react";
 import { TriggerIcon, AIIcon, SMSIcon, WidgetIcon, CloseIcon, TrashIcon } from "@/components/icons";
 import { WorkflowStepConnector } from "@/components/workflow-step-connector";
 import {
   ADD_STEP_CATALOG_GROUPS,
   findCatalogItem,
+  getDefaultCustomStepAlias,
   isCatalogItemBasicTier,
   WORKFLOW_BASIC_CATALOG_IDS,
   WORKFLOW_CATALOG_DRAG_MIME,
@@ -40,6 +49,29 @@ import {
   WORKFLOW_TIER_CHIP_FONT_STYLE,
   type CatalogItemWithCategory,
 } from "@/components/add-step-catalog";
+import {
+  parseAiWorkflowFromPrompt,
+  isAiRunFunctionBasicTier,
+} from "@/lib/ai-workflow-from-prompt";
+import {
+  isWorkflowBasicTriggerOption,
+  WORKFLOW_BASIC_START_DATE_BROWSE_PATH,
+  type WorkflowBasicStartDateBrowsePath,
+} from "@/lib/workflow-basic-trigger";
+import { cn } from "@/lib/utils";
+import TriggerSelector from "@/components/trigger-selector/TriggerSelector";
+
+/** Matches WFchat `WorkflowStepCard` — width, radius, selected shadow, dimmed opacity. */
+function workflowCanvasNodeClass(isSelected: boolean, hasCanvasSelection: boolean) {
+  return cn(
+    "flex w-[280px] min-h-[62px] shrink-0 cursor-pointer flex-col overflow-hidden rounded-lg border bg-white outline-none transition-[box-shadow,opacity,border-color] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40",
+    isSelected
+      ? "border-2 border-[#5aa5e7] shadow-[0_4px_14px_rgba(0,0,0,0.06)]"
+      : hasCanvasSelection
+        ? "border border-[#e0dede] opacity-40 hover:opacity-100"
+        : "border border-[#e0dede]"
+  );
+}
 
 const RIPPLING_CATEGORIES = [
   "Employee",
@@ -68,16 +100,34 @@ type WorkflowFlowStep =
   | { id: string; role: "widget"; title: string }
   | {
       id: string;
+      role: "runFunction";
+      runLabel: string;
+      functionTitle: string;
+      summary: string;
+      functionTier: "basic" | "advanced";
+    }
+  | {
+      id: string;
       role: "custom";
       catalogItemId: string;
       title: string;
       categoryLabel: string;
     };
 
-function getWorkflowTier(steps: WorkflowFlowStep[]): "Basic" | "Advanced" {
+function getWorkflowTier(
+  steps: WorkflowFlowStep[],
+  triggerOptionId: string | null
+): "Basic" | "Advanced" {
+  if (triggerOptionId !== null && !isWorkflowBasicTriggerOption(triggerOptionId)) {
+    return "Advanced";
+  }
   for (const step of steps) {
     if (step.role === "trigger") continue;
     if (step.role === "aiPrompt" || step.role === "widget") return "Advanced";
+    if (step.role === "runFunction") {
+      if (step.functionTier === "advanced") return "Advanced";
+      continue;
+    }
     if (
       step.role === "custom" &&
       !WORKFLOW_BASIC_CATALOG_IDS.has(step.catalogItemId)
@@ -88,6 +138,15 @@ function getWorkflowTier(steps: WorkflowFlowStep[]): "Basic" | "Advanced" {
   return "Basic";
 }
 
+/** Whether a step forces Advanced tier (same rules as {@link getWorkflowTier}, excluding trigger). */
+function isWorkflowStepAdvancedTier(step: WorkflowFlowStep): boolean {
+  if (step.role === "trigger") return false;
+  if (step.role === "aiPrompt" || step.role === "widget") return true;
+  if (step.role === "runFunction") return step.functionTier === "advanced";
+  if (step.role === "custom") return !WORKFLOW_BASIC_CATALOG_IDS.has(step.catalogItemId);
+  return false;
+}
+
 export default function Home() {
   const router = useRouter();
   const pathname = usePathname();
@@ -96,16 +155,45 @@ export default function Home() {
   ]);
   const [selectedCanvasStepId, setSelectedCanvasStepId] = useState<string | null>(null);
 
-  const workflowTier = useMemo(
-    () => getWorkflowTier(workflowFlowSteps),
-    [workflowFlowSteps]
-  );
-
   const [workflowTitle, setWorkflowTitle] = useState("Scheduled health check");
   const [workflowTitleEditing, setWorkflowTitleEditing] = useState(false);
   const [workflowTitleDraft, setWorkflowTitleDraft] = useState(workflowTitle);
   const workflowTitleInputRef = useRef<HTMLInputElement>(null);
+  /** Canvas + trigger drawer — updated when AI chat builds a workflow from a prompt. */
+  const [workflowTriggerLabel, setWorkflowTriggerLabel] = useState(
+    "Start date at 9:00 AM PST"
+  );
+  /** From trigger modal / AI; only `start-date` keeps Basic tier eligible with Basic steps. */
+  const [workflowTriggerOptionId, setWorkflowTriggerOptionId] = useState<string | null>(
+    "start-date"
+  );
 
+  const workflowTier = useMemo(
+    () => getWorkflowTier(workflowFlowSteps, workflowTriggerOptionId),
+    [workflowFlowSteps, workflowTriggerOptionId]
+  );
+
+  /** Basic vs Advanced on catalog rows only applies when the trigger can yield a Basic workflow (`start-date`). */
+  const catalogStepTierLabelsActive = isWorkflowBasicTriggerOption(workflowTriggerOptionId);
+
+  type WorkflowChatMessage = {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+  };
+  const [workflowChatMessages, setWorkflowChatMessages] = useState<WorkflowChatMessage[]>(
+    []
+  );
+  const [workflowChatInput, setWorkflowChatInput] = useState("");
+  const [workflowChatBusy, setWorkflowChatBusy] = useState(false);
+  const workflowChatEndRef = useRef<HTMLDivElement>(null);
+  /** Right “Workflow assistant” column — toggled from purple top bar or Close in pane. */
+  const [workflowAssistantOpen, setWorkflowAssistantOpen] = useState(true);
+  /** Trigger selection modal (shared with triggerselection prototype). */
+  const [workflowTriggerSelectorOpen, setWorkflowTriggerSelectorOpen] = useState(false);
+  /** When set, opening the trigger selector jumps to this browse path (e.g. Start date detail). */
+  const [triggerSelectorInitialBrowse, setTriggerSelectorInitialBrowse] =
+    useState<WorkflowBasicStartDateBrowsePath | null>(null);
   useEffect(() => {
     if (workflowTitleEditing) {
       workflowTitleInputRef.current?.focus();
@@ -147,17 +235,18 @@ export default function Home() {
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `step-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    const newStep: WorkflowFlowStep = {
-      id,
-      role: "custom",
-      catalogItemId: item.id,
-      title: item.label,
-      categoryLabel: item.category,
-    };
     setWorkflowFlowSteps((prev) => {
       const tr = prev[0];
       if (!tr || tr.role !== "trigger") return prev;
       const mid = prev.slice(1);
+      const title = getDefaultCustomStepAlias(item.id, mid);
+      const newStep: WorkflowFlowStep = {
+        id,
+        role: "custom",
+        catalogItemId: item.id,
+        title,
+        categoryLabel: item.category,
+      };
       const next = [...mid];
       const idx = Math.min(Math.max(0, insertIndex), next.length);
       next.splice(idx, 0, newStep);
@@ -171,6 +260,90 @@ export default function Home() {
     setWorkflowFlowSteps((prev) => prev.filter((s) => s.id !== id));
     setSelectedCanvasStepId(null);
   }
+
+  function handleRemoveAdvancedSteps() {
+    setWorkflowFlowSteps((prev) => {
+      const next = prev.filter((s) => !isWorkflowStepAdvancedTier(s));
+      setSelectedCanvasStepId((cur) =>
+        cur && next.some((s) => s.id === cur) ? cur : null
+      );
+      return next;
+    });
+  }
+
+  function handleWorkflowChatSubmit() {
+    const raw = workflowChatInput.trim();
+    if (!raw || workflowChatBusy) return;
+
+    const mid =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `m-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    setWorkflowChatMessages((prev) => [
+      ...prev,
+      { id: `u-${mid}`, role: "user", content: raw },
+    ]);
+    setWorkflowChatInput("");
+    setWorkflowChatBusy(true);
+
+    window.setTimeout(() => {
+      const parsed = parseAiWorkflowFromPrompt(raw);
+      const stepId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `step-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+      const runStep: WorkflowFlowStep = {
+        id: stepId,
+        role: "runFunction",
+        runLabel: parsed.runLabel,
+        functionTitle: parsed.functionTitle,
+        summary: parsed.summary,
+        functionTier: parsed.functionTier,
+      };
+
+      setWorkflowTriggerLabel(parsed.triggerLabel);
+      setWorkflowTriggerOptionId(parsed.triggerOptionId);
+      setWorkflowTitle(parsed.workflowName);
+      setWorkflowTitleDraft(parsed.workflowName);
+      setWorkflowFlowSteps([
+        { id: WORKFLOW_TRIGGER_ID, role: "trigger" },
+        runStep,
+      ]);
+      setSelectedCanvasStepId(runStep.id);
+
+      const detailLines = [
+        `When it runs: ${parsed.triggerLabel}`,
+        `What it does: ${parsed.summary}`,
+        `Function tier: ${
+          parsed.functionTier === "basic"
+            ? "Basic (single email or task action)"
+            : "Advanced (more than email/task-only)"
+        }`,
+      ];
+      if (parsed.assumptions.length) {
+        detailLines.push(`Note: ${parsed.assumptions.join(" ")}`);
+      }
+      const assistantContent = `Created “${parsed.workflowName}”.\n\n${detailLines.join(
+        "\n"
+      )}`;
+
+      const aid =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `a-${Date.now()}`;
+      setWorkflowChatMessages((prev) => [
+        ...prev,
+        { id: `a-${aid}`, role: "assistant", content: assistantContent },
+      ]);
+      setWorkflowChatBusy(false);
+    }, 720);
+  }
+
+  useEffect(() => {
+    workflowChatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [workflowChatMessages, workflowChatBusy]);
 
   const [showVariablePicker, setShowVariablePicker] = useState(false);
   const [pickerContext, setPickerContext] = useState<"aiPrompt" | "widget">("aiPrompt");
@@ -990,7 +1163,28 @@ For each category, determine if the employee is compliant or non-compliant based
               <path d="M107.535 4.10201C105.02 4.10201 103.377 5.70201 103.377 8.08746C103.377 10.4729 104.948 11.8984 107.39 11.8984H107.564C108.393 11.8984 109.324 11.7238 110.181 11.4475V8.69837H105.907V7.24382H112.769V12.0293C111.344 12.7711 109.193 13.3529 107.448 13.3529H107.216C103.203 13.3529 100.615 11.2293 100.615 8.14564C100.615 5.06201 103.276 2.64746 107.361 2.64746H107.594C109.294 2.64746 111.243 3.18564 112.682 4.02928L111.926 5.26564C110.632 4.55292 109.091 4.10201 107.71 4.10201H107.535V4.10201Z" fill="white"/>
             </svg>
           </div>
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-4 sm:gap-6">
+            {currentPage === "Workflows" && (
+              <button
+                type="button"
+                onClick={() => setWorkflowAssistantOpen((open) => !open)}
+                className="flex size-9 shrink-0 items-center justify-center rounded-md text-white/95 transition-colors hover:bg-white/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50"
+                aria-expanded={workflowAssistantOpen}
+                aria-controls="workflow-assistant-panel"
+                aria-label={
+                  workflowAssistantOpen
+                    ? "Collapse workflow assistant"
+                    : "Expand workflow assistant"
+                }
+                title={
+                  workflowAssistantOpen
+                    ? "Hide workflow assistant"
+                    : "Show workflow assistant"
+                }
+              >
+                <Sparkles className="size-5" aria-hidden />
+              </button>
+            )}
             <div className="flex items-center gap-2 text-white">
               <span className="text-sm font-medium">Support</span>
               <div className="w-px h-6 bg-white/30" />
@@ -1005,10 +1199,15 @@ For each category, determine if the employee is compliant or non-compliant based
             </div>
           </div>
         </div>
+      </div>
 
-        {/* Navigation Bar - Workflows (Figma 1170:22109) */}
-        {currentPage === "Workflows" && (
-          <div className="flex h-[72px] min-h-[72px] items-center justify-between border-b border-[#e0dede] bg-white px-[18px] py-3">
+      {/* Main Content - Workflows (nav + workspace share the left column; assistant aligns to the right of both) */}
+      {currentPage === "Workflows" && (
+      <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-[#f9f7f6] pt-14">
+        <div className="flex min-h-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Navigation Bar - Workflows (Figma 1170:22109) — only spans main column, not assistant */}
+          <div className="flex h-[72px] min-h-[72px] shrink-0 items-center justify-between border-b border-[#e0dede] bg-white px-[18px] py-3">
             <div className="flex min-w-0 flex-1 items-center gap-3">
               <Button
                 type="button"
@@ -1061,16 +1260,88 @@ For each category, determine if the employee is compliant or non-compliant based
                       {workflowTitle}
                     </button>
                   )}
-                  <span
-                    className={
-                      workflowTier === "Advanced"
-                        ? WORKFLOW_TIER_CHIP_CLASS_ADVANCED
-                        : WORKFLOW_TIER_CHIP_CLASS_BASIC
-                    }
-                    style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                  >
-                    {workflowTier}
-                  </span>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <TooltipProvider delayDuration={200}>
+                      <Tooltip
+                        disableHoverableContent={workflowTier !== "Advanced"}
+                      >
+                        <TooltipTrigger asChild>
+                          <span
+                            className={
+                              workflowTier === "Advanced"
+                                ? `${WORKFLOW_TIER_CHIP_CLASS_ADVANCED} cursor-help`
+                                : `${WORKFLOW_TIER_CHIP_CLASS_BASIC} cursor-help`
+                            }
+                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                            tabIndex={0}
+                            aria-label={
+                              workflowTier === "Advanced"
+                                ? isWorkflowBasicTriggerOption(workflowTriggerOptionId)
+                                  ? "Workflow tier Advanced. Hover for details; you can remove advanced steps or review tier rules."
+                                  : "Workflow tier Advanced. Hover for details and optional action to use a Basic trigger."
+                                : "Workflow tier. Hover or focus for how Basic vs Advanced is determined."
+                            }
+                          >
+                            {workflowTier}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent
+                          side="bottom"
+                          align="start"
+                          className="max-w-[min(320px,calc(100vw-2rem))] p-0 pointer-events-auto"
+                        >
+                          <div className="px-3 py-2.5">
+                            <p
+                              className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-[#8c8888]"
+                              style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                            >
+                              Basic vs advanced
+                            </p>
+                            <p
+                              className="text-[12px] leading-[17px] text-[#595555]"
+                              style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                            >
+                              The trigger must be{" "}
+                              <span className="font-medium text-[#252528]">Start date</span> (Popular or
+                              Relative to a date). Then a workflow stays{" "}
+                              <span className="font-medium text-[#252528]">Basic</span> only if every step
+                              (besides the trigger) is{" "}
+                              <span className="font-medium text-[#252528]">Send an email</span> or{" "}
+                              <span className="font-medium text-[#252528]">Assign a task</span>, or an
+                              AI-generated <span className="font-medium text-[#252528]">Run function</span>{" "}
+                              whose logic is email-only or task-only. Anything else—including other
+                              notifications, Rippling actions, logic, AI/widget steps, or a function that
+                              does more than that—makes it{" "}
+                              <span className="font-medium text-[#252528]">Advanced</span>.
+                            </p>
+                            {workflowTier === "Advanced" ? (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                className="mt-3 h-9 w-full rounded-md border border-[#e0dede] bg-white px-3 text-[13px] text-[#252528] shadow-none hover:bg-[#f5f5f5]"
+                                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isWorkflowBasicTriggerOption(workflowTriggerOptionId)) {
+                                    handleRemoveAdvancedSteps();
+                                  } else {
+                                    setTriggerSelectorInitialBrowse({
+                                      ...WORKFLOW_BASIC_START_DATE_BROWSE_PATH,
+                                    });
+                                    setWorkflowTriggerSelectorOpen(true);
+                                  }
+                                }}
+                              >
+                                {isWorkflowBasicTriggerOption(workflowTriggerOptionId)
+                                  ? "Remove advanced steps"
+                                  : "Use Basic trigger"}
+                              </Button>
+                            ) : null}
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1110,12 +1381,8 @@ For each category, determine if the employee is compliant or non-compliant based
               </Button>
             </div>
           </div>
-        )}
-      </div>
 
-      {/* Main Content - Workflows */}
-      {currentPage === "Workflows" && (
-      <div className="flex h-screen pt-32">
+        <div className="flex min-h-0 flex-1 min-w-0">
         {/* Left Panel - Always shows "Add a step" at 300px */}
         <div
           className={`w-[300px] shrink-0 border-r border-[#e0dede] bg-white flex flex-col h-full relative overflow-visible ${
@@ -1125,30 +1392,7 @@ For each category, determine if the employee is compliant or non-compliant based
           <div className="flex-1 overflow-y-auto">
             {/* "Add a step" panel - always rendered */}
               <div className="px-5 py-6">
-                <h2 className="text-black mb-3" style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535, fontSize: "20px", lineHeight: "28px" }}>Add a step</h2>
-
-                <div
-                  className="mb-4 rounded-lg border border-[#e0dede] bg-[#f9f7f6] px-3 py-2.5"
-                  role="note"
-                >
-                  <p
-                    className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-[#8c8888]"
-                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
-                  >
-                    Basic vs advanced
-                  </p>
-                  <p
-                    className="text-[12px] leading-[17px] text-[#595555]"
-                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                  >
-                    A workflow stays <span className="font-medium text-[#252528]">Basic</span> only if
-                    every step (besides the trigger) is{" "}
-                    <span className="font-medium text-[#252528]">Send an email</span> or{" "}
-                    <span className="font-medium text-[#252528]">Assign a task</span>. Anything
-                    else—including other notifications, Rippling actions, logic, or any AI/widget
-                    step—makes it <span className="font-medium text-[#252528]">Advanced</span>.
-                  </p>
-                </div>
+                <h2 className="text-black mb-4" style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535, fontSize: "20px", lineHeight: "28px" }}>Add a step</h2>
 
                 <div className="bg-[#e0dede] h-px mb-5" />
 
@@ -1168,9 +1412,11 @@ For each category, determine if the employee is compliant or non-compliant based
                           key={item.id}
                           draggable
                           title={
-                            tierBasic
-                              ? "Basic-tier: OK for a Basic workflow if you only add Send an email and Assign a task steps."
-                              : "Advanced-tier: adds or keeps this workflow as Advanced."
+                            catalogStepTierLabelsActive
+                              ? tierBasic
+                                ? "Basic-tier: OK for a Basic workflow if you only add Send an email and Assign a task steps."
+                                : "Advanced-tier: adds or keeps this workflow as Advanced."
+                              : "With your current trigger, the workflow stays Advanced. Basic vs Advanced on steps only applies when the trigger is Start date."
                           }
                           onDragStart={(e) => {
                             e.dataTransfer.setData(WORKFLOW_CATALOG_DRAG_MIME, item.id);
@@ -1195,16 +1441,18 @@ For each category, determine if the employee is compliant or non-compliant based
                           >
                             {item.label}
                           </span>
-                          <span
-                            className={`pointer-events-none shrink-0 ${
-                              tierBasic
-                                ? WORKFLOW_TIER_CHIP_CLASS_BASIC
-                                : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
-                            }`}
-                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                          >
-                            {tierBasic ? "Basic" : "Advanced"}
-                          </span>
+                          {catalogStepTierLabelsActive ? (
+                            <span
+                              className={`pointer-events-none shrink-0 ${
+                                tierBasic
+                                  ? WORKFLOW_TIER_CHIP_CLASS_BASIC
+                                  : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                              }`}
+                              style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                            >
+                              {tierBasic ? "Basic" : "Advanced"}
+                            </span>
+                          ) : null}
                         </div>
                         );
                       })}
@@ -1235,12 +1483,27 @@ For each category, determine if the employee is compliant or non-compliant based
                   <div>
                     <p className="text-sm font-medium text-black mb-2">Event</p>
                     <p className="text-sm text-black mb-4">This workflow will trigger based on the following event</p>
-                    <div className="bg-white border border-[#e0dede] rounded-lg h-[72px] px-6 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <TriggerIcon className="size-6 text-[#716f6c]" />
-                        <p className="text-sm font-medium text-black">Start date at 9:00 AM PST</p>
+                    <div className="bg-white border border-[#e0dede] rounded-lg h-[72px] px-6 flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        <TriggerIcon className="size-6 shrink-0 text-[#716f6c]" />
+                        <p className="min-w-0 flex-1 truncate text-sm font-medium text-black">
+                          {workflowTriggerLabel}
+                        </p>
+                        {isWorkflowBasicTriggerOption(workflowTriggerOptionId) ? (
+                          <span
+                            className={`${WORKFLOW_TIER_CHIP_CLASS_BASIC} shrink-0`}
+                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                          >
+                            Basic
+                          </span>
+                        ) : null}
                       </div>
-                      <Button variant="ghost" className="text-[#4a6ba6] hover:text-[#4a6ba6]">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="text-[#4a6ba6] hover:text-[#4a6ba6]"
+                        onClick={() => setWorkflowTriggerSelectorOpen(true)}
+                      >
                         Change
                       </Button>
                     </div>
@@ -2053,6 +2316,199 @@ For each category, determine if the employee is compliant or non-compliant based
               </div>
             )}
 
+            {selectedFlowStep?.role === "runFunction" && (
+              <div className="flex h-full flex-col">
+                <div className="flex-1 overflow-y-auto p-6">
+                  {/* Matches WFchat StepDetailsDrawer + editor function branch */}
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h2
+                        className="text-black"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                          fontSize: "20px",
+                          lineHeight: "28px",
+                        }}
+                      >
+                        Run function
+                      </h2>
+                      <p
+                        className="mt-1 text-[13px] leading-4 tracking-[0.25px] text-[#595555]"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                      >
+                        ID: {selectedFlowStep.id.replace(/^[^-]+-/, "").slice(0, 12) || selectedFlowStep.id}
+                      </p>
+                    </div>
+                    <CloseIcon
+                      className="size-6 shrink-0 cursor-pointer text-black"
+                      onClick={() => setSelectedCanvasStepId(null)}
+                    />
+                  </div>
+                  <div className="mb-6 h-px bg-[#e0dede]" />
+
+                  {/* FunctionAiDescriptionNotice — WFchat workflow-canvas */}
+                  <div
+                    className="mb-6 flex flex-col gap-3 rounded-xl border border-[#e8d5e0] bg-white p-5"
+                    role="region"
+                    aria-label="AI-generated function summary"
+                  >
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <AIIcon className="size-6 shrink-0" />
+                      <span
+                        className="text-sm font-semibold leading-5 text-[#252528]"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 600 }}
+                        id="fn-ai-summary-heading"
+                      >
+                        AI Summary
+                      </span>
+                      <span
+                        className="inline-flex max-w-[200px] min-w-0 shrink items-center overflow-hidden text-ellipsis whitespace-nowrap rounded bg-[#f3f4f6] px-2 py-0.5 text-[11px] font-medium leading-4 text-[#595555]"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif" }}
+                      >
+                        Function
+                      </span>
+                    </div>
+                    <div className="h-px w-full shrink-0 bg-[#e0dede]" aria-hidden />
+                    <div className="-mx-5 flex flex-col px-5">
+                      <div
+                        role="textbox"
+                        aria-readonly="true"
+                        aria-multiline="true"
+                        aria-labelledby="fn-ai-summary-heading"
+                        className="w-full whitespace-pre-wrap border-0 bg-transparent px-0 py-1 text-[15px] leading-[1.35] text-[#252528]"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                      >
+                        {selectedFlowStep.summary}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div
+                    className="space-y-5"
+                    role="region"
+                    id="fn-drawer-setup-fields"
+                    aria-label="Function step fields"
+                  >
+                    <div>
+                      <label
+                        className="mb-1 block text-[15px] leading-[19px] tracking-[0.25px] text-black"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                      >
+                        Step name <span className="text-[#c3402c]">*</span>
+                      </label>
+                      <Input
+                        readOnly
+                        value={selectedFlowStep.functionTitle}
+                        className="h-10 w-full border-[#CCCCCC]"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        className="mb-1 block text-[15px] leading-[19px] tracking-[0.25px] text-black"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                        id="fn-catalog-label"
+                      >
+                        Function name
+                      </label>
+                      <button
+                        type="button"
+                        aria-labelledby="fn-catalog-label"
+                        className="flex h-10 w-full cursor-default items-center justify-between gap-2 rounded-lg border border-[#CCCCCC] bg-white px-4 text-left text-[15px] text-[#252528]"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 430,
+                          letterSpacing: "0.25px",
+                        }}
+                      >
+                        <span className="min-w-0 truncate">{selectedFlowStep.functionTitle}</span>
+                        <ChevronDown className="size-5 shrink-0 text-[#252528]" aria-hidden />
+                      </button>
+                    </div>
+                  </div>
+
+                  {catalogStepTierLabelsActive ? (
+                    isAiRunFunctionBasicTier(selectedFlowStep) ? (
+                      <div className="mb-2 mt-6 flex items-start gap-1.5 rounded-md bg-[#f0fdf4] px-2.5 py-2 text-[13px] leading-[1.35] text-[#166534]">
+                        <span className="font-semibold" aria-hidden>
+                          ↑
+                        </span>
+                        <span style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}>
+                          Basic-tier path: single email or task automation. Use{" "}
+                          <code className="rounded bg-white/80 px-1 font-mono text-[12px] text-[#14532d]">
+                            isAiRunFunctionBasicTier(step)
+                          </code>{" "}
+                          to branch in code.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="mb-2 mt-6 flex items-start gap-1.5 rounded-md border border-[#e8d5e0] bg-[#fafafa] px-2.5 py-2 text-[13px] leading-[1.35] text-[#595555]">
+                        <span style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}>
+                          Advanced-tier: logic beyond a single email or task. Same helper applies for
+                          runtime checks.
+                        </span>
+                      </div>
+                    )
+                  ) : null}
+
+                  <div
+                    className="overflow-hidden rounded-lg border border-[#e0dede] bg-[#252528]"
+                    role="region"
+                    id="fn-drawer-code-panel"
+                    aria-label="Generated code"
+                  >
+                      <div className="flex items-center justify-between border-b border-[#3f3f46] bg-[#2d2d33] px-3 py-2">
+                        <span
+                          className="font-mono text-[13px] text-[#a1a1aa]"
+                        >{`/workflow/${selectedFlowStep.id.slice(0, 8) || "function"}`}</span>
+                        <div className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            className="inline-flex size-8 items-center justify-center rounded text-[#e4e4e7] hover:bg-white/10"
+                            aria-label="Expand code view"
+                          >
+                            <Maximize2 className="size-4" />
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex size-8 items-center justify-center rounded text-[#e4e4e7] hover:bg-white/10"
+                            aria-label="Edit code"
+                          >
+                            <Pencil className="size-4" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex min-h-[200px] font-mono text-xs leading-[1.45] text-[#e8e6e3]">
+                        <div
+                          className="shrink-0 select-none border-r border-[#3f3f46] bg-[#27272a] py-3 pr-3 pl-2 text-right text-[#71717a]"
+                          aria-hidden
+                        >
+                          {[
+                            "import RipplingSDK from \"@rippling/rippling-sdk\";",
+                            "",
+                            "export async function onRipplingEvent(event, context) {",
+                            "  const sdk = new RipplingSDK({ bearerToken: context.token });",
+                            "  // …",
+                            "}",
+                          ].map((_, i) => (
+                            <div key={i}>{i + 1}</div>
+                          ))}
+                        </div>
+                        <pre className="m-0 flex-1 overflow-x-auto whitespace-pre p-3 tab-size-2">
+{`import RipplingSDK from "@rippling/rippling-sdk";
+
+export async function onRipplingEvent(event, context) {
+  const sdk = new RipplingSDK({ bearerToken: context.token });
+  // …
+}`}
+                        </pre>
+                      </div>
+                    </div>
+                </div>
+              </div>
+            )}
+
             {selectedFlowStep?.role === "custom" && (
               <div className="p-6">
                 <div className="mb-4">
@@ -2143,56 +2599,68 @@ For each category, determine if the employee is compliant or non-compliant based
         </div>
 
         {/* Center Panel - Workflow Visualization (scrollable tree; trigger stays pinned) */}
-        <div className="relative z-0 flex min-h-0 flex-1 flex-col pt-8">
+        <div className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col pt-8">
           <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
             <div className="flex flex-col items-center pb-24">
               <div className="sticky top-0 z-10 mb-0 flex w-full flex-col items-center gap-0 bg-[#f9f7f6] pt-4 pb-0">
-                <Card
-                  className={`h-[62px] w-[250px] gap-0 py-0 cursor-pointer rounded-md border shadow-none transition-all flex flex-row items-center ${
-                    selectedCanvasStepId === WORKFLOW_TRIGGER_ID
-                      ? "border-2 border-[#5aa5e7] bg-white opacity-100"
-                      : selectedCanvasStepId === null
-                        ? "border-[#e0dede] opacity-100"
-                        : "border-[#e0dede] opacity-40"
-                  }`}
+                <div
+                  className={workflowCanvasNodeClass(
+                    selectedCanvasStepId === WORKFLOW_TRIGGER_ID,
+                    selectedCanvasStepId !== null
+                  )}
                   onClick={() => setSelectedCanvasStepId(WORKFLOW_TRIGGER_ID)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedCanvasStepId(WORKFLOW_TRIGGER_ID);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                 >
-                  <div className="flex h-full w-full items-center gap-3 px-3">
+                  {/* StepCardHeader — WFchat workflow-canvas */}
+                  <div className="box-border flex w-full flex-row items-start gap-3 p-3">
                     <TriggerIcon
-                      className={`size-6 shrink-0 ${selectedCanvasStepId === WORKFLOW_TRIGGER_ID || selectedCanvasStepId === null ? "text-black" : "text-[#8c8888]"}`}
+                      className={cn(
+                        "size-6 shrink-0",
+                        selectedCanvasStepId !== null &&
+                          selectedCanvasStepId !== WORKFLOW_TRIGGER_ID
+                          ? "text-[#8c8888]"
+                          : "text-[#252528]"
+                      )}
                     />
-                    <div className="flex min-w-0 flex-1 flex-col justify-center">
+                    <div className="flex min-w-0 flex-1 flex-col">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <p
+                          className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-[#252528]"
+                          style={{
+                            fontFamily: "'Basel Grotesk', sans-serif",
+                            fontWeight: 600,
+                          }}
+                        >
+                          Workflow trigger
+                        </p>
+                        {isWorkflowBasicTriggerOption(workflowTriggerOptionId) ? (
+                          <span
+                            className={`${WORKFLOW_TIER_CHIP_CLASS_BASIC} shrink-0`}
+                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                          >
+                            Basic
+                          </span>
+                        ) : null}
+                      </div>
                       <p
-                        className="truncate"
+                        className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
                         style={{
                           fontFamily: "'Basel Grotesk', sans-serif",
-                          fontWeight: 430,
-                          fontSize: "12px",
-                          lineHeight: "16px",
-                          color: "#6F6F72",
-                          flex: "none",
-                          alignSelf: "stretch",
+                          fontWeight: 400,
                         }}
                       >
-                        Workflow trigger
-                      </p>
-                      <p
-                        className="truncate"
-                        style={{
-                          fontFamily: "'Basel Grotesk', sans-serif",
-                          fontWeight: 535,
-                          fontSize: "16px",
-                          lineHeight: "24px",
-                          color: "#252528",
-                          flex: "none",
-                          alignSelf: "stretch",
-                        }}
-                      >
-                        Start date at 9:00 AM PST
+                        {workflowTriggerLabel}
                       </p>
                     </div>
                   </div>
-                </Card>
+                </div>
                 <WorkflowStepConnector
                   insertIndex={0}
                   onInsertStep={handleInsertCatalogStep}
@@ -2203,47 +2671,58 @@ For each category, determine if the employee is compliant or non-compliant based
 
             {workflowFlowSteps.slice(1).map((step, idx) => (
               <Fragment key={step.id}>
-                <Card
-                  className={`w-[250px] h-[62px] border flex items-center shadow-none rounded-md cursor-pointer transition-all ${
-                    selectedCanvasStepId === step.id
-                      ? "border-2 border-[#5aa5e7] bg-white opacity-100"
-                      : selectedCanvasStepId === null
-                        ? "border-[#e0dede] opacity-100"
-                        : "opacity-40 border-[#e0dede]"
-                  }`}
+                <div
+                  className={workflowCanvasNodeClass(
+                    selectedCanvasStepId === step.id,
+                    selectedCanvasStepId !== null
+                  )}
                   onClick={() => setSelectedCanvasStepId(step.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedCanvasStepId(step.id);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                 >
-                  <div className="px-3 flex items-center gap-3 w-full h-full">
+                  <div className="box-border flex w-full flex-row items-start gap-3 p-3">
                     {step.role === "aiPrompt" && (
                       <>
                         <AIIcon
-                          className={`size-6 shrink-0 ${selectedCanvasStepId === step.id || selectedCanvasStepId === null ? "" : "opacity-40"}`}
+                          className={cn(
+                            "size-6 shrink-0",
+                            selectedCanvasStepId !== null && selectedCanvasStepId !== step.id && "opacity-40"
+                          )}
                         />
-                        <div className="flex-1 min-w-0 flex flex-col justify-center">
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <p
+                              className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-[#252528]"
+                              style={{
+                                fontFamily: "'Basel Grotesk', sans-serif",
+                                fontWeight: 600,
+                              }}
+                            >
+                              AI agent
+                            </p>
+                            {catalogStepTierLabelsActive ? (
+                              <span
+                                className={cn(
+                                  "pointer-events-none shrink-0",
+                                  WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                                )}
+                                style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                              >
+                                Advanced
+                              </span>
+                            ) : null}
+                          </div>
                           <p
-                            className="truncate"
+                            className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
                             style={{
                               fontFamily: "'Basel Grotesk', sans-serif",
-                              fontWeight: 430,
-                              fontSize: "12px",
-                              lineHeight: "16px",
-                              color: "#6F6F72",
-                              flex: "none",
-                              alignSelf: "stretch",
-                            }}
-                          >
-                            AI agent
-                          </p>
-                          <p
-                            className="truncate"
-                            style={{
-                              fontFamily: "'Basel Grotesk', sans-serif",
-                              fontWeight: 535,
-                              fontSize: "16px",
-                              lineHeight: "24px",
-                              color: "#252528",
-                              flex: "none",
-                              alignSelf: "stretch",
+                              fontWeight: 400,
                             }}
                           >
                             {step.title}
@@ -2254,33 +2733,41 @@ For each category, determine if the employee is compliant or non-compliant based
                     {step.role === "widget" && (
                       <>
                         <WidgetIcon
-                          className={`size-6 shrink-0 ${selectedCanvasStepId === step.id || selectedCanvasStepId === null ? "text-black" : "text-[#8c8888]"}`}
+                          className={cn(
+                            "size-6 shrink-0",
+                            selectedCanvasStepId !== null && selectedCanvasStepId !== step.id
+                              ? "text-[#8c8888]"
+                              : "text-black"
+                          )}
                         />
-                        <div className="flex-1 min-w-0 flex flex-col justify-center">
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <p
+                              className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-[#252528]"
+                              style={{
+                                fontFamily: "'Basel Grotesk', sans-serif",
+                                fontWeight: 600,
+                              }}
+                            >
+                              Update widget
+                            </p>
+                            {catalogStepTierLabelsActive ? (
+                              <span
+                                className={cn(
+                                  "pointer-events-none shrink-0",
+                                  WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                                )}
+                                style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                              >
+                                Advanced
+                              </span>
+                            ) : null}
+                          </div>
                           <p
-                            className="truncate"
+                            className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
                             style={{
                               fontFamily: "'Basel Grotesk', sans-serif",
-                              fontWeight: 430,
-                              fontSize: "12px",
-                              lineHeight: "16px",
-                              color: "#6F6F72",
-                              flex: "none",
-                              alignSelf: "stretch",
-                            }}
-                          >
-                            Update widget
-                          </p>
-                          <p
-                            className="truncate"
-                            style={{
-                              fontFamily: "'Basel Grotesk', sans-serif",
-                              fontWeight: 535,
-                              fontSize: "16px",
-                              lineHeight: "24px",
-                              color: "#252528",
-                              flex: "none",
-                              alignSelf: "stretch",
+                              fontWeight: 400,
                             }}
                           >
                             {step.title}
@@ -2288,48 +2775,110 @@ For each category, determine if the employee is compliant or non-compliant based
                         </div>
                       </>
                     )}
-                    {step.role === "custom" && (() => {
-                      const cat = findCatalogItem(step.catalogItemId);
-                      return (
-                        <>
-                          <div className="flex size-6 shrink-0 items-center justify-center text-[#595555]">
-                            {cat?.icon ?? <ClipboardList className="size-4" />}
-                          </div>
-                          <div className="flex-1 min-w-0 flex flex-col justify-center">
+                    {step.role === "runFunction" && (
+                      <>
+                        <Terminal
+                          className={cn(
+                            "size-6 shrink-0",
+                            selectedCanvasStepId !== null && selectedCanvasStepId !== step.id
+                              ? "text-[#8c8888]"
+                              : "text-[#252528]"
+                          )}
+                          strokeWidth={2}
+                        />
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <div className="flex min-w-0 items-center gap-2">
                             <p
-                              className="truncate"
+                              className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-[#252528]"
                               style={{
                                 fontFamily: "'Basel Grotesk', sans-serif",
-                                fontWeight: 430,
-                                fontSize: "12px",
-                                lineHeight: "16px",
-                                color: "#6F6F72",
-                                flex: "none",
-                                alignSelf: "stretch",
+                                fontWeight: 600,
                               }}
                             >
-                              {step.categoryLabel}
+                              {step.runLabel}
                             </p>
-                            <p
-                              className="truncate"
-                              style={{
-                                fontFamily: "'Basel Grotesk', sans-serif",
-                                fontWeight: 535,
-                                fontSize: "16px",
-                                lineHeight: "24px",
-                                color: "#252528",
-                                flex: "none",
-                                alignSelf: "stretch",
-                              }}
-                            >
-                              {step.title}
-                            </p>
+                            {catalogStepTierLabelsActive ? (
+                              <span
+                                className={cn(
+                                  "pointer-events-none shrink-0",
+                                  step.functionTier === "basic"
+                                    ? WORKFLOW_TIER_CHIP_CLASS_BASIC
+                                    : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                                )}
+                                style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                              >
+                                {step.functionTier === "basic" ? "Basic" : "Advanced"}
+                              </span>
+                            ) : null}
                           </div>
-                        </>
-                      );
-                    })()}
+                          <p
+                            className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
+                            style={{
+                              fontFamily: "'Basel Grotesk', sans-serif",
+                              fontWeight: 400,
+                            }}
+                          >
+                            {step.functionTitle}
+                          </p>
+                        </div>
+                      </>
+                    )}
+                    {step.role === "custom" &&
+                      (() => {
+                        const cat = findCatalogItem(step.catalogItemId);
+                        const dim =
+                          selectedCanvasStepId !== null && selectedCanvasStepId !== step.id;
+                        const catalogBasic = isCatalogItemBasicTier(step.catalogItemId);
+                        return (
+                          <>
+                            <div
+                              className={cn(
+                                "flex size-6 shrink-0 items-center justify-center text-[#595555]",
+                                dim && "opacity-40"
+                              )}
+                            >
+                              {cat?.icon ?? <ClipboardList className="size-4" />}
+                            </div>
+                            <div className="flex min-w-0 flex-1 flex-col">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <p
+                                  className="min-w-0 flex-1 truncate text-[14px] leading-[18px] text-[#252528]"
+                                  style={{
+                                    fontFamily: "'Basel Grotesk', sans-serif",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {cat?.label ?? step.title}
+                                </p>
+                                {catalogStepTierLabelsActive ? (
+                                  <span
+                                    className={cn(
+                                      "pointer-events-none shrink-0",
+                                      catalogBasic
+                                        ? WORKFLOW_TIER_CHIP_CLASS_BASIC
+                                        : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                                    )}
+                                    style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                                  >
+                                    {catalogBasic ? "Basic" : "Advanced"}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p
+                                className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
+                                style={{
+                                  fontFamily: "'Basel Grotesk', sans-serif",
+                                  fontWeight: 400,
+                                }}
+                              >
+                                {step.title}
+                              </p>
+                            </div>
+                          </>
+                        );
+                      })()}
                   </div>
-                </Card>
+                </div>
 
                 <WorkflowStepConnector
                   insertIndex={idx + 1}
@@ -2360,6 +2909,135 @@ For each category, determine if the employee is compliant or non-compliant based
             </Button>
           </div>
         </div>
+        </div>
+      </div>
+
+        {/* AI workflow chat (WFchat-style: prompt → trigger + Run function on canvas) */}
+        {workflowAssistantOpen && (
+        <div
+          id="workflow-assistant-panel"
+          className="relative z-10 flex h-full min-h-0 w-[380px] shrink-0 flex-col border-l border-[#e0dede] bg-white"
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[#e0dede] px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <Sparkles className="size-5 shrink-0 text-[#7A005D]" aria-hidden />
+              <div className="min-w-0">
+                <p
+                  className="truncate text-[15px] leading-5 text-[#252528]"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                >
+                  Workflow assistant
+                </p>
+                <p
+                  className="text-[11px] leading-4 text-[#8c8888]"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                >
+                  Describe what to automate
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setWorkflowAssistantOpen(false)}
+              className="flex size-9 shrink-0 items-center justify-center rounded-md text-[#595555] transition-colors hover:bg-[#f5f5f5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+              aria-label="Close workflow assistant"
+            >
+              <X className="size-5" strokeWidth={2} />
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            {workflowChatMessages.length === 0 && !workflowChatBusy && (
+              <p
+                className="text-sm text-[#8c8888]"
+                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+              >
+                Try: &ldquo;Send an email on an employee&apos;s start date&rdquo; — the canvas will
+                show your trigger and a <span className="font-medium text-[#252528]">Run function</span>{" "}
+                step (Basic if it&apos;s only email or task logic; Advanced otherwise).
+              </p>
+            )}
+            <div className="flex flex-col gap-3">
+              {workflowChatMessages.map((m) => (
+                <div
+                  key={m.id}
+                  className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                >
+                  <div
+                    className={`max-w-[min(100%,20rem)] rounded-lg px-3 py-2 text-sm leading-5 ${
+                      m.role === "user"
+                        ? "bg-[#7A005D] text-white"
+                        : "border border-[#e0dede] bg-[#f9f7f6] text-[#252528]"
+                    }`}
+                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                  >
+                    {m.content.split("\n").map((line, i) => (
+                      <p key={i} className={i > 0 ? "mt-1" : ""}>
+                        {line}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {workflowChatBusy && (
+                <div className="flex justify-start">
+                  <div
+                    className="rounded-lg border border-[#e0dede] bg-[#f9f7f6] px-3 py-2 text-sm text-[#595555]"
+                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                  >
+                    Translating your request into trigger + function…
+                  </div>
+                </div>
+              )}
+              <div ref={workflowChatEndRef} />
+            </div>
+          </div>
+
+          <div className="shrink-0 border-t border-[#e0dede] p-3">
+            <div className="flex gap-2 rounded-lg border border-[#e0dede] bg-[#f9f7f6] p-2">
+              <textarea
+                className="min-h-[44px] max-h-[160px] flex-1 resize-y bg-transparent px-2 py-1.5 text-sm text-[#252528] outline-none placeholder:text-[#a8a4a4]"
+                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                placeholder="Ask, search, or create a workflow…"
+                rows={2}
+                value={workflowChatInput}
+                onChange={(e) => setWorkflowChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleWorkflowChatSubmit();
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                className="h-10 w-10 shrink-0 self-end rounded-md bg-[#7A005D] p-0 text-white hover:bg-[#7A005D]/90 disabled:opacity-40"
+                aria-label="Send"
+                disabled={!workflowChatInput.trim() || workflowChatBusy}
+                onClick={handleWorkflowChatSubmit}
+              >
+                <ArrowUp className="mx-auto size-5" strokeWidth={2} />
+              </Button>
+            </div>
+          </div>
+        </div>
+        )}
+
+        <TriggerSelector
+          open={workflowTriggerSelectorOpen}
+          onOpenChange={(nextOpen) => {
+            setWorkflowTriggerSelectorOpen(nextOpen);
+            if (!nextOpen) {
+              setTriggerSelectorInitialBrowse(null);
+            }
+          }}
+          initialBrowseSelection={triggerSelectorInitialBrowse}
+          onTriggerConfirm={({ displayLabel, optionId }) => {
+            setWorkflowTriggerLabel(displayLabel);
+            setWorkflowTriggerOptionId(optionId);
+          }}
+        />
+      </div>
       </div>
       )}
 

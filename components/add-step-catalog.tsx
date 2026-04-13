@@ -199,3 +199,45 @@ export function findCatalogItem(id: string): CatalogItemWithCategory | undefined
   }
   return undefined;
 }
+
+/** Default “step name” line on the canvas (e.g. Email 1, Task 2) — keyed by catalog item id. */
+const CATALOG_STEP_DEFAULT_ALIAS_PREFIX: Record<string, string> = {
+  "notif-email": "Email",
+  "notif-sms": "SMS",
+  "notif-push": "Push",
+  "notif-task": "Task",
+  "notif-teams": "Teams",
+  "notif-slack": "Slack",
+  "rp-survey": "Survey",
+  "rp-report": "Report",
+  "rp-timeoff": "Time off",
+  "rp-review": "Review",
+  "rp-payment": "Payment",
+  "rp-create-obj": "Create object",
+  "rp-update-obj": "Update object",
+  "rp-delete-obj": "Delete object",
+  "other-gcal": "Calendar",
+  "other-api": "API",
+  "other-query": "Query",
+  "other-var": "Variable",
+  "other-wait-event": "Event wait",
+  "other-wait-duration": "Pause",
+  "logic-if-else": "Branch",
+  "logic-wait": "Wait",
+};
+
+type StepLike = { role: string; catalogItemId?: string };
+
+/**
+ * Next default alias for a catalog-backed step: `{prefix} {n}` where n increments per catalog item id.
+ */
+export function getDefaultCustomStepAlias(
+  catalogItemId: string,
+  existingNonTriggerSteps: readonly StepLike[]
+): string {
+  const prefix = CATALOG_STEP_DEFAULT_ALIAS_PREFIX[catalogItemId] ?? "Step";
+  const sameType = existingNonTriggerSteps.filter(
+    (s) => s.role === "custom" && s.catalogItemId === catalogItemId
+  ).length;
+  return `${prefix} ${sameType + 1}`;
+}
