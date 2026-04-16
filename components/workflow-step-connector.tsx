@@ -20,6 +20,8 @@ type WorkflowStepConnectorProps = {
   catalogDragActive?: boolean;
   /** Called after a successful catalog drop or when drag ends (parent clears drag UI state). */
   onCatalogDragStateEnd?: () => void;
+  /** When true, popover shows Basic tier legend + chips (matches left “Add a step” pane). */
+  catalogStepTierLabelsActive?: boolean;
 };
 
 /**
@@ -42,6 +44,7 @@ export function WorkflowStepConnector({
   onInsertStep,
   catalogDragActive = false,
   onCatalogDragStateEnd,
+  catalogStepTierLabelsActive = false,
 }: WorkflowStepConnectorProps) {
   const [open, setOpen] = useState(false);
   const [dropOver, setDropOver] = useState(false);
@@ -206,6 +209,7 @@ export function WorkflowStepConnector({
         createPortal(
           <div ref={popoverRef} style={popoverStyle}>
             <AddStepPopover
+              showTierLegend={catalogStepTierLabelsActive}
               onSelect={(item) => {
                 onInsertStep(item, insertIndex);
                 setOpen(false);

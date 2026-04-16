@@ -7,7 +7,6 @@ import { cn } from "@/lib/utils";
 import {
   ADD_STEP_CATALOG_GROUPS,
   isCatalogItemBasicTier,
-  WORKFLOW_TIER_CHIP_CLASS_ADVANCED,
   WORKFLOW_TIER_CHIP_CLASS_BASIC,
   WORKFLOW_TIER_CHIP_FONT_STYLE,
   type CatalogItemWithCategory,
@@ -16,12 +15,31 @@ import {
 type AddStepPopoverProps = {
   className?: string;
   onSelect: (item: CatalogItemWithCategory) => void;
+  /** When true, show the Basic vs Advanced legend (same as Basic chips on catalog rows). */
+  showTierLegend?: boolean;
 };
+
+/** Shared copy for sidebar + connector popover; only render when Basic tier chips are shown. */
+export function AddStepTierLegendParagraph({ className }: { className?: string }) {
+  return (
+    <p
+      className={cn("text-[11px] leading-[14px] text-[#8c8888]", className)}
+      style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+    >
+      <span className="font-medium text-[#595555]">Basic</span> = only with other Basic steps;
+      anything else is <span className="font-medium text-[#595555]">Advanced</span>.
+    </p>
+  );
+}
 
 /**
  * Searchable step list matching the “Add a step” pane + connector popover (Figma ~11:8956).
  */
-export function AddStepPopover({ className, onSelect }: AddStepPopoverProps) {
+export function AddStepPopover({
+  className,
+  onSelect,
+  showTierLegend = false,
+}: AddStepPopoverProps) {
   const [query, setQuery] = useState("");
 
   const filteredGroups = useMemo(() => {
@@ -55,13 +73,9 @@ export function AddStepPopover({ className, onSelect }: AddStepPopoverProps) {
             style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 400 }}
           />
         </div>
-        <p
-          className="mt-2 text-[11px] leading-[14px] text-[#8c8888]"
-          style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-        >
-          <span className="font-medium text-[#595555]">Basic</span> = only with other Basic steps;
-          anything else is <span className="font-medium text-[#595555]">Advanced</span>.
-        </p>
+        {showTierLegend ? (
+          <AddStepTierLegendParagraph className="mt-2" />
+        ) : null}
       </div>
       <div
         className="max-h-[min(360px,calc(100vh-120px))] overflow-y-auto overscroll-contain px-0 pb-2"
@@ -105,16 +119,14 @@ export function AddStepPopover({ className, onSelect }: AddStepPopoverProps) {
                     >
                       {item.label}
                     </span>
-                    <span
-                      className={`shrink-0 ${
-                        tierBasic
-                          ? WORKFLOW_TIER_CHIP_CLASS_BASIC
-                          : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
-                      }`}
-                      style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                    >
-                      {tierBasic ? "Basic" : "Advanced"}
-                    </span>
+                    {showTierLegend && tierBasic ? (
+                      <span
+                        className={`shrink-0 ${WORKFLOW_TIER_CHIP_CLASS_BASIC}`}
+                        style={WORKFLOW_TIER_CHIP_FONT_STYLE}
+                      >
+                        Basic
+                      </span>
+                    ) : null}
                     <GripVertical
                       className="size-4 shrink-0 text-[#bfbebe]"
                       aria-hidden

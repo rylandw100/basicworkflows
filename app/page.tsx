@@ -28,6 +28,7 @@ import {
   Globe,
   Terminal,
   ClipboardList,
+  Mail,
   X,
   GripVertical,
   AlertTriangle,
@@ -61,6 +62,7 @@ import {
 } from "@/lib/workflow-basic-trigger";
 import { cn } from "@/lib/utils";
 import TriggerSelector from "@/components/trigger-selector/TriggerSelector";
+import { AddStepTierLegendParagraph } from "@/components/add-step-popover";
 
 /** Matches WFchat `WorkflowStepCard` — width, radius, selected shadow, dimmed opacity. */
 function workflowCanvasNodeClass(isSelected: boolean, hasCanvasSelection: boolean) {
@@ -94,6 +96,11 @@ const RIPPLING_CATEGORIES = [
 ];
 
 const WORKFLOW_TRIGGER_ID = "flow-trigger";
+
+/** Prototype: active Advanced workflows across the org before this draft (tier tooltip). */
+const ORG_ACTIVE_ADVANCED_WORKFLOWS = 6;
+/** Bar track is capped at this org max (same scale as the chart). */
+const ORG_ADVANCED_CHART_MAX = 10;
 
 type WorkflowFlowStep =
   | { id: string; role: "trigger" }
@@ -218,6 +225,17 @@ export default function Home() {
   }
   /** Sidebar catalog chip is being dragged — canvas connectors show expanded drop targets. */
   const [catalogDragActive, setCatalogDragActive] = useState(false);
+  /** Post-trigger suggestion strip — dismiss hides until the user trims back to trigger-only. */
+  const [postTriggerSuggestionsDismissed, setPostTriggerSuggestionsDismissed] =
+    useState(false);
+  const prevNonTriggerStepCountRef = useRef(0);
+  useEffect(() => {
+    const n = Math.max(0, workflowFlowSteps.length - 1);
+    if (n === 0 && prevNonTriggerStepCountRef.current > 0) {
+      setPostTriggerSuggestionsDismissed(false);
+    }
+    prevNonTriggerStepCountRef.current = n;
+  }, [workflowFlowSteps.length]);
 
   const selectedFlowStep =
     workflowFlowSteps.find((s) => s.id === selectedCanvasStepId) ?? null;
@@ -1316,9 +1334,7 @@ For each category, determine if the employee is compliant or non-compliant based
                   )}
                   <div className="flex min-w-0 items-center gap-2">
                     <TooltipProvider delayDuration={200}>
-                      <Tooltip
-                        disableHoverableContent={workflowTier !== "Advanced"}
-                      >
+                      <Tooltip disableHoverableContent={false}>
                         <TooltipTrigger asChild>
                           <span
                             className={
@@ -1331,9 +1347,9 @@ For each category, determine if the employee is compliant or non-compliant based
                             aria-label={
                               workflowTier === "Advanced"
                                 ? isWorkflowBasicTriggerOption(workflowTriggerOptionId)
-                                  ? "Workflow tier Advanced. Hover for details; you can remove advanced steps or review tier rules."
-                                  : "Workflow tier Advanced. Hover for details and optional action to use a Basic trigger."
-                                : "Workflow tier. Hover or focus for how Basic vs Advanced is determined."
+                                  ? "Workflow tier Advanced. Hover for details, org Advanced usage, and optional actions."
+                                  : "Workflow tier Advanced. Hover for details, org Advanced usage, and optional actions."
+                                : "Workflow tier Basic. Hover or focus for tier rules and org Advanced workflow usage."
                             }
                           >
                             {workflowTier}
@@ -1342,7 +1358,7 @@ For each category, determine if the employee is compliant or non-compliant based
                         <TooltipContent
                           side="bottom"
                           align="start"
-                          className="max-w-[min(320px,calc(100vw-2rem))] p-0 pointer-events-auto"
+                          className="max-w-[min(360px,calc(100vw-2rem))] p-0 pointer-events-auto"
                         >
                           <div className="px-3 py-2.5">
                             <p
@@ -1355,19 +1371,101 @@ For each category, determine if the employee is compliant or non-compliant based
                               className="text-[12px] leading-[17px] text-[#595555]"
                               style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
                             >
-                              The trigger must be{" "}
-                              <span className="font-medium text-[#252528]">Start date</span> (Popular or
-                              Relative to a date). Then a workflow stays{" "}
-                              <span className="font-medium text-[#252528]">Basic</span> only if every step
-                              (besides the trigger) is{" "}
-                              <span className="font-medium text-[#252528]">Send an email</span> or{" "}
-                              <span className="font-medium text-[#252528]">Assign a task</span>, or an
-                              AI-generated <span className="font-medium text-[#252528]">Run function</span>{" "}
-                              whose logic is email-only or task-only. Anything else—including other
-                              notifications, Rippling actions, logic, AI/widget steps, or a function that
-                              does more than that—makes it{" "}
+                              <span className="font-medium text-[#252528]">Basic</span> requires a{" "}
+                              <span className="font-medium text-[#252528]">Start date</span> trigger and
+                              non-trigger steps that are only{" "}
+                              <span className="font-medium text-[#252528]">Send an email</span>,{" "}
+                              <span className="font-medium text-[#252528]">Assign a task</span>, or a{" "}
+                              <span className="font-medium text-[#252528]">Run function</span> limited to
+                              email-or-task behavior. Anything else is{" "}
                               <span className="font-medium text-[#252528]">Advanced</span>.
                             </p>
+                            <div className="mt-3 border-t border-[#ebe9e9] pt-3">
+                              <p
+                                className="mb-2 text-[11px] font-medium uppercase tracking-wide text-[#8c8888]"
+                                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                              >
+                                Advanced workflows
+                              </p>
+                              <p
+                                className="mb-2 text-[12px] leading-[17px] text-[#595555]"
+                                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                              >
+                                <span className="font-medium text-[#252528]">
+                                  {ORG_ACTIVE_ADVANCED_WORKFLOWS}
+                                </span>{" "}
+                                of {ORG_ADVANCED_CHART_MAX} Advanced workflows active org-wide.
+                              </p>
+                              <div
+                                className="mb-2 flex h-2.5 w-full overflow-hidden rounded-full bg-[#eceae9]"
+                                role="img"
+                                aria-label={
+                                  workflowTier === "Advanced"
+                                    ? `Combined chart on scale 0–${ORG_ADVANCED_CHART_MAX}: ${ORG_ACTIVE_ADVANCED_WORKFLOWS} active today (solid), plus 1 projected (dashed)`
+                                    : `Chart on scale 0–${ORG_ADVANCED_CHART_MAX}: ${ORG_ACTIVE_ADVANCED_WORKFLOWS} active Advanced workflows`
+                                }
+                              >
+                                <div
+                                  className={cn(
+                                    "h-full shrink-0 bg-[#7A005D]/90 transition-[width] duration-300",
+                                    workflowTier === "Advanced" ? "rounded-l-full" : "rounded-full"
+                                  )}
+                                  style={{
+                                    width: `${(ORG_ACTIVE_ADVANCED_WORKFLOWS / ORG_ADVANCED_CHART_MAX) * 100}%`,
+                                  }}
+                                />
+                                {workflowTier === "Advanced" ? (
+                                  <div
+                                    className="h-full shrink-0 rounded-r-full border border-dashed border-[#7A005D] bg-[#d4b8cc]/90"
+                                    style={{
+                                      width: `${(1 / ORG_ADVANCED_CHART_MAX) * 100}%`,
+                                    }}
+                                    title="Projected +1 when this workflow is activated"
+                                  />
+                                ) : null}
+                              </div>
+                              <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-[14px] text-[#8c8888]">
+                                <span
+                                  className="inline-flex items-center gap-1.5"
+                                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                                >
+                                  <span
+                                    className="inline-block size-2 shrink-0 rounded-sm bg-[#7A005D]/90"
+                                    aria-hidden
+                                  />
+                                  Today
+                                </span>
+                                {workflowTier === "Advanced" ? (
+                                  <span
+                                    className="inline-flex items-center gap-1.5"
+                                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                                  >
+                                    <span
+                                      className="inline-block size-2 shrink-0 rounded-sm border border-dashed border-[#7A005D] bg-[#d4b8cc]/90"
+                                      aria-hidden
+                                    />
+                                    +1 if you activate ({ORG_ACTIVE_ADVANCED_WORKFLOWS + 1} total)
+                                  </span>
+                                ) : null}
+                              </div>
+                              {workflowTier === "Advanced" ? (
+                                <p
+                                  className="text-[12px] leading-[17px] text-[#595555]"
+                                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                                >
+                                  <span className="font-medium text-[#252528]">Advanced</span> draft—dashed
+                                  segment shows this workflow once it&apos;s live.
+                                </p>
+                              ) : (
+                                <p
+                                  className="text-[12px] leading-[17px] text-[#595555]"
+                                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                                >
+                                  <span className="font-medium text-[#252528]">Basic</span> draft—activating
+                                  it won&apos;t add to the org Advanced count above.
+                                </p>
+                              )}
+                            </div>
                             {workflowTier === "Advanced" ? (
                               <Button
                                 type="button"
@@ -1450,6 +1548,10 @@ For each category, determine if the employee is compliant or non-compliant based
 
                 <div className="bg-[#e0dede] h-px mb-5" />
 
+                {catalogStepTierLabelsActive ? (
+                  <AddStepTierLegendParagraph className="mb-5" />
+                ) : null}
+
                 {ADD_STEP_CATALOG_GROUPS.filter((g) => g.category !== "Logic").map((group) => (
                   <div key={group.category} className="mb-5">
                     <p
@@ -1495,16 +1597,12 @@ For each category, determine if the employee is compliant or non-compliant based
                           >
                             {item.label}
                           </span>
-                          {catalogStepTierLabelsActive ? (
+                          {catalogStepTierLabelsActive && tierBasic ? (
                             <span
-                              className={`pointer-events-none shrink-0 ${
-                                tierBasic
-                                  ? WORKFLOW_TIER_CHIP_CLASS_BASIC
-                                  : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
-                              }`}
+                              className={`pointer-events-none shrink-0 ${WORKFLOW_TIER_CHIP_CLASS_BASIC}`}
                               style={WORKFLOW_TIER_CHIP_FONT_STYLE}
                             >
-                              {tierBasic ? "Basic" : "Advanced"}
+                              Basic
                             </span>
                           ) : null}
                         </div>
@@ -2720,8 +2818,87 @@ export async function onRipplingEvent(event, context) {
                   onInsertStep={handleInsertCatalogStep}
                   catalogDragActive={catalogDragActive}
                   onCatalogDragStateEnd={() => setCatalogDragActive(false)}
+                  catalogStepTierLabelsActive={catalogStepTierLabelsActive}
                 />
               </div>
+
+              {workflowFlowSteps.length === 1 && !postTriggerSuggestionsDismissed ? (
+                <div className="relative mt-3 w-[280px] rounded-lg border border-[#e0dede] bg-white px-3 py-3 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
+                  <button
+                    type="button"
+                    className="absolute right-2 top-2 rounded-md p-1 text-[#a8a4a4] transition-colors hover:bg-[#f5f5f5] hover:text-[#595555]"
+                    aria-label="Dismiss suggested next steps"
+                    onClick={() => setPostTriggerSuggestionsDismissed(true)}
+                  >
+                    <X className="size-4" strokeWidth={2} />
+                  </button>
+                  <div className="flex items-start gap-2 pr-7">
+                    <Sparkles
+                      className="mt-0.5 size-4 shrink-0 text-[#7A005D]"
+                      strokeWidth={2}
+                      aria-hidden
+                    />
+                    <div>
+                      <p
+                        className="text-[14px] leading-[18px] text-[#252528]"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Suggested next steps
+                      </p>
+                      <p
+                        className="mt-1 text-[13px] leading-[1.35] text-[#595555]"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                      >
+                        Pick a common pattern—or add any step from the left. You can customize
+                        fields and branching after you place a step.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-col gap-1.5">
+                    {(
+                      [
+                        {
+                          id: "notif-email" as const,
+                          label: "Send an email",
+                          Icon: Mail,
+                        },
+                        {
+                          id: "notif-task" as const,
+                          label: "Assign a task",
+                          Icon: ClipboardList,
+                        },
+                      ] as const
+                    ).map(({ id, label, Icon }) => {
+                      const item = findCatalogItem(id);
+                      if (!item) return null;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          className="flex w-full items-center gap-2 rounded-md border border-[#ebe9e9] bg-[#f9f7f6] px-2.5 py-2 text-left transition-colors hover:border-[#d8d6d6] hover:bg-white"
+                          onClick={() => handleInsertCatalogStep(item, 0)}
+                        >
+                          <span className="flex size-7 shrink-0 items-center justify-center rounded border border-[#e8e6e6] bg-white text-[#595555]">
+                            <Icon className="size-3.5" strokeWidth={2} aria-hidden />
+                          </span>
+                          <span
+                            className="min-w-0 flex-1 text-[14px] text-[#252528]"
+                            style={{
+                              fontFamily: "'Basel Grotesk', sans-serif",
+                              fontWeight: 430,
+                            }}
+                          >
+                            {label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
 
             {workflowFlowSteps.slice(1).map((step, idx) => (
               <Fragment key={step.id}>
@@ -2760,17 +2937,6 @@ export async function onRipplingEvent(event, context) {
                             >
                               AI agent
                             </p>
-                            {catalogStepTierLabelsActive ? (
-                              <span
-                                className={cn(
-                                  "pointer-events-none shrink-0",
-                                  WORKFLOW_TIER_CHIP_CLASS_ADVANCED
-                                )}
-                                style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                              >
-                                Advanced
-                              </span>
-                            ) : null}
                           </div>
                           <p
                             className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
@@ -2805,17 +2971,6 @@ export async function onRipplingEvent(event, context) {
                             >
                               Update widget
                             </p>
-                            {catalogStepTierLabelsActive ? (
-                              <span
-                                className={cn(
-                                  "pointer-events-none shrink-0",
-                                  WORKFLOW_TIER_CHIP_CLASS_ADVANCED
-                                )}
-                                style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                              >
-                                Advanced
-                              </span>
-                            ) : null}
                           </div>
                           <p
                             className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
@@ -2851,17 +3006,16 @@ export async function onRipplingEvent(event, context) {
                             >
                               {step.runLabel}
                             </p>
-                            {catalogStepTierLabelsActive ? (
+                            {catalogStepTierLabelsActive &&
+                            step.functionTier === "basic" ? (
                               <span
                                 className={cn(
                                   "pointer-events-none shrink-0",
-                                  step.functionTier === "basic"
-                                    ? WORKFLOW_TIER_CHIP_CLASS_BASIC
-                                    : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                                  WORKFLOW_TIER_CHIP_CLASS_BASIC
                                 )}
                                 style={WORKFLOW_TIER_CHIP_FONT_STYLE}
                               >
-                                {step.functionTier === "basic" ? "Basic" : "Advanced"}
+                                Basic
                               </span>
                             ) : null}
                           </div>
@@ -2904,17 +3058,15 @@ export async function onRipplingEvent(event, context) {
                                 >
                                   {cat?.label ?? step.title}
                                 </p>
-                                {catalogStepTierLabelsActive ? (
+                                {catalogStepTierLabelsActive && catalogBasic ? (
                                   <span
                                     className={cn(
                                       "pointer-events-none shrink-0",
-                                      catalogBasic
-                                        ? WORKFLOW_TIER_CHIP_CLASS_BASIC
-                                        : WORKFLOW_TIER_CHIP_CLASS_ADVANCED
+                                      WORKFLOW_TIER_CHIP_CLASS_BASIC
                                     )}
                                     style={WORKFLOW_TIER_CHIP_FONT_STYLE}
                                   >
-                                    {catalogBasic ? "Basic" : "Advanced"}
+                                    Basic
                                   </span>
                                 ) : null}
                               </div>
@@ -2939,6 +3091,7 @@ export async function onRipplingEvent(event, context) {
                   onInsertStep={handleInsertCatalogStep}
                   catalogDragActive={catalogDragActive}
                   onCatalogDragStateEnd={() => setCatalogDragActive(false)}
+                  catalogStepTierLabelsActive={catalogStepTierLabelsActive}
                 />
               </Fragment>
             ))}
