@@ -171,6 +171,20 @@ export function isCatalogItemBasicTier(itemId: string): boolean {
   return WORKFLOW_BASIC_CATALOG_IDS.has(itemId);
 }
 
+/** Order for the “Basic actions” section when the trigger is Basic-eligible. */
+export const WORKFLOW_BASIC_ACTION_IDS_ORDER = ["notif-email", "notif-task"] as const;
+
+/** Email + task rows for the Basic actions bucket (category label for new steps). */
+export function getBasicActionCatalogItems(): CatalogItemWithCategory[] {
+  const notifications = ADD_STEP_CATALOG_GROUPS.find((g) => g.category === "Notifications");
+  if (!notifications) return [];
+  return WORKFLOW_BASIC_ACTION_IDS_ORDER.map((id) => {
+    const item = notifications.items.find((i) => i.id === id);
+    if (!item) return null;
+    return { ...item, category: "Basic actions" } satisfies CatalogItemWithCategory;
+  }).filter((x): x is CatalogItemWithCategory => x !== null);
+}
+
 /** Matches the workflow header Basic / Advanced pills (sidebar + popover use the same). */
 export const WORKFLOW_TIER_CHIP_CLASS_BASIC =
   "inline-flex h-5 shrink-0 items-center rounded border border-[#e0dede] bg-[#f9f7f6] px-2 text-[12px] leading-[15px] tracking-[0.25px] text-[#595555]";

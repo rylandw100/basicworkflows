@@ -3,12 +3,6 @@
 import { useState, useEffect, useRef, useMemo, Fragment } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { VariablePath } from "@/components/variable-picker";
@@ -41,13 +35,11 @@ import { WorkflowStepConnector } from "@/components/workflow-step-connector";
 import {
   ADD_STEP_CATALOG_GROUPS,
   findCatalogItem,
+  getBasicActionCatalogItems,
   getDefaultCustomStepAlias,
   isCatalogItemBasicTier,
   WORKFLOW_BASIC_CATALOG_IDS,
   WORKFLOW_CATALOG_DRAG_MIME,
-  WORKFLOW_TIER_CHIP_CLASS_ADVANCED,
-  WORKFLOW_TIER_CHIP_CLASS_BASIC,
-  WORKFLOW_TIER_CHIP_FONT_STYLE,
   type CatalogItemWithCategory,
 } from "@/components/add-step-catalog";
 import {
@@ -61,8 +53,24 @@ import {
   type WorkflowBasicStartDateBrowsePath,
 } from "@/lib/workflow-basic-trigger";
 import { cn } from "@/lib/utils";
+import {
+  getActiveAdvancedDraftNoQuotaCopy,
+  getOption2PublishRow,
+  getOwnerSaveMenuBaseItems,
+  getOwnerSaveDropdownRows,
+  getOwnerSwitchDisabled,
+  getOption2PrimaryButtonLabel,
+  getTurnOnMenuItemForOwnerToolbar,
+  getWorkflowHeaderDisplayVersion,
+  getWorkflowHeaderOption2LifecycleLabel,
+  getWorkflowOwnerLiveBlockerText,
+  isWorkflowLifecycleActive,
+  WORKFLOW_HEADER_SAVE_AND_PUBLISH_LABEL,
+} from "@/lib/workflow-header-prototype";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { WorkflowNoQuotaTooltip } from "@/components/workflow-no-quota-tooltip";
 import TriggerSelector from "@/components/trigger-selector/TriggerSelector";
-import { AddStepTierLegendParagraph } from "@/components/add-step-popover";
 
 /** Matches WFchat `WorkflowStepCard` — width, radius, selected shadow, dimmed opacity. */
 function workflowCanvasNodeClass(isSelected: boolean, hasCanvasSelection: boolean) {
@@ -97,10 +105,17 @@ const RIPPLING_CATEGORIES = [
 
 const WORKFLOW_TRIGGER_ID = "flow-trigger";
 
-/** Prototype: active Advanced workflows across the org before this draft (tier tooltip). */
-const ORG_ACTIVE_ADVANCED_WORKFLOWS = 6;
-/** Bar track is capped at this org max (same scale as the chart). */
-const ORG_ADVANCED_CHART_MAX = 10;
+/** Matches WFchat `workflow-canvas-demo` top-nav prototype pickers (toolbar / quota / lifecycle). */
+type WorkflowProtoRole = "wf_owner" | "wf_collaborator" | "wf_viewer";
+type WorkflowProtoLifecycle =
+  | "inactive"
+  | "inactive_draft"
+  | "active"
+  | "active_draft"
+  | "draft_errors"
+  | "draft_clean";
+type WorkflowProtoQuota = "has_quota" | "no_quota";
+type WorkflowProtoHeaderUx = "option1" | "option2";
 
 type WorkflowFlowStep =
   | { id: string; role: "trigger" }
@@ -124,39 +139,6 @@ type WorkflowFlowStep =
       categoryLabel: string;
     };
 
-function getWorkflowTier(
-  steps: WorkflowFlowStep[],
-  triggerOptionId: string | null
-): "Basic" | "Advanced" {
-  if (triggerOptionId !== null && !isWorkflowBasicTriggerOption(triggerOptionId)) {
-    return "Advanced";
-  }
-  for (const step of steps) {
-    if (step.role === "trigger") continue;
-    if (step.role === "aiPrompt" || step.role === "widget") return "Advanced";
-    if (step.role === "runFunction") {
-      if (step.functionTier === "advanced") return "Advanced";
-      continue;
-    }
-    if (
-      step.role === "custom" &&
-      !WORKFLOW_BASIC_CATALOG_IDS.has(step.catalogItemId)
-    ) {
-      return "Advanced";
-    }
-  }
-  return "Basic";
-}
-
-/** Whether a step forces Advanced tier (same rules as {@link getWorkflowTier}, excluding trigger). */
-function isWorkflowStepAdvancedTier(step: WorkflowFlowStep): boolean {
-  if (step.role === "trigger") return false;
-  if (step.role === "aiPrompt" || step.role === "widget") return true;
-  if (step.role === "runFunction") return step.functionTier === "advanced";
-  if (step.role === "custom") return !WORKFLOW_BASIC_CATALOG_IDS.has(step.catalogItemId);
-  return false;
-}
-
 export default function Home() {
   const router = useRouter();
   const pathname = usePathname();
@@ -178,13 +160,23 @@ export default function Home() {
     "start-date"
   );
 
-  const workflowTier = useMemo(
-    () => getWorkflowTier(workflowFlowSteps, workflowTriggerOptionId),
-    [workflowFlowSteps, workflowTriggerOptionId]
-  );
-
   /** Basic vs Advanced on catalog rows only applies when the trigger can yield a Basic workflow (`start-date`). */
   const catalogStepTierLabelsActive = isWorkflowBasicTriggerOption(workflowTriggerOptionId);
+
+  /**
+   * True when this canvas workflow is **Advanced** (non–Basic-eligible trigger, or any step beyond
+   * Basic-tier email/task catalog steps / basic Run function). Drives prototype quota in the purple bar.
+   */
+  const workflowCanvasIsAdvanced = useMemo(() => {
+    if (!isWorkflowBasicTriggerOption(workflowTriggerOptionId)) return true;
+    for (const step of workflowFlowSteps) {
+      if (step.role === "trigger") continue;
+      if (step.role === "aiPrompt" || step.role === "widget") return true;
+      if (step.role === "runFunction" && step.functionTier === "advanced") return true;
+      if (step.role === "custom" && !isCatalogItemBasicTier(step.catalogItemId)) return true;
+    }
+    return false;
+  }, [workflowFlowSteps, workflowTriggerOptionId]);
 
   type WorkflowChatMessage = {
     id: string;
@@ -228,6 +220,224 @@ export default function Home() {
   /** Post-trigger suggestion strip — dismiss hides until the user trims back to trigger-only. */
   const [postTriggerSuggestionsDismissed, setPostTriggerSuggestionsDismissed] =
     useState(false);
+
+  const [workflowProtoHeaderUx, setWorkflowProtoHeaderUx] =
+    useState<WorkflowProtoHeaderUx>("option1");
+  const [workflowProtoRole, setWorkflowProtoRole] = useState<WorkflowProtoRole>("wf_owner");
+  const [workflowProtoLifecycle, setWorkflowProtoLifecycle] =
+    useState<WorkflowProtoLifecycle>("active");
+  const [workflowProtoQuota, setWorkflowProtoQuota] =
+    useState<WorkflowProtoQuota>("has_quota");
+  /**
+   * Going **Advanced** forces “no quota” for allocation demos. Going back to **Basic** does not
+   * force “has quota” — you can keep “Does not have quota” while a basic workflow stays live, then
+   * edit to advanced (draft can’t activate while prior publish remains active).
+   */
+  useEffect(() => {
+    if (workflowCanvasIsAdvanced) {
+      setWorkflowProtoQuota("no_quota");
+    }
+  }, [workflowCanvasIsAdvanced]);
+  /** Last **live** published snapshot vN (what’s running); only bumps when a ship actually succeeds. */
+  const [workflowPublishedVersion, setWorkflowPublishedVersion] = useState(2);
+  const [workflowHeaderSaveMenuOpen, setWorkflowHeaderSaveMenuOpen] = useState(false);
+
+  const workflowProtoIsViewer = workflowProtoRole === "wf_viewer";
+  const isWorkflowHeaderOwner = workflowProtoRole === "wf_owner";
+
+  const ownerLiveBlockerTooltip = useMemo(
+    () =>
+      isWorkflowHeaderOwner
+        ? getWorkflowOwnerLiveBlockerText(workflowProtoLifecycle, workflowProtoQuota)
+        : null,
+    [isWorkflowHeaderOwner, workflowProtoLifecycle, workflowProtoQuota]
+  );
+
+  const workflowHeaderDisplayVersion = useMemo(
+    () =>
+      getWorkflowHeaderDisplayVersion(
+        workflowProtoLifecycle,
+        workflowPublishedVersion
+      ),
+    [workflowProtoLifecycle, workflowPublishedVersion]
+  );
+
+  const option2LifecycleLabel = useMemo(
+    () =>
+      getWorkflowHeaderOption2LifecycleLabel(
+        workflowProtoLifecycle,
+        workflowPublishedVersion
+      ),
+    [workflowProtoLifecycle, workflowPublishedVersion]
+  );
+
+  const option2PrimaryLabel = useMemo(
+    () =>
+      getOption2PrimaryButtonLabel(
+        workflowProtoLifecycle,
+        workflowProtoQuota,
+        workflowPublishedVersion,
+        workflowCanvasIsAdvanced
+      ),
+    [
+      workflowProtoLifecycle,
+      workflowProtoQuota,
+      workflowPublishedVersion,
+      workflowCanvasIsAdvanced,
+    ]
+  );
+
+  /** Plain active/inactive: header Save split (and Option 2 Publish) is disabled; use a draft-related lifecycle in the top bar. */
+  const headerStableLifecycleBlocksSaveSplit = useMemo(
+    () =>
+      workflowProtoLifecycle === "active" || workflowProtoLifecycle === "inactive",
+    [workflowProtoLifecycle]
+  );
+
+  const ownerLiveSwitchDisabled = useMemo(
+    () =>
+      isWorkflowHeaderOwner && workflowProtoHeaderUx === "option1"
+        ? getOwnerSwitchDisabled(
+            workflowProtoLifecycle,
+            workflowProtoQuota,
+            workflowPublishedVersion
+          )
+        : false,
+    [
+      isWorkflowHeaderOwner,
+      workflowProtoHeaderUx,
+      workflowProtoLifecycle,
+      workflowProtoQuota,
+      workflowPublishedVersion,
+    ]
+  );
+
+  /** Option 1: when live + advanced draft + no quota, tooltip explains prior publish stays on (not default plan copy). */
+  const option1NoQuotaTooltipBody = useMemo(() => {
+    if (workflowProtoQuota !== "no_quota") return undefined;
+    if (workflowProtoHeaderUx !== "option1") return undefined;
+    if (!isWorkflowLifecycleActive(workflowProtoLifecycle) || !workflowCanvasIsAdvanced)
+      return undefined;
+    return getActiveAdvancedDraftNoQuotaCopy(workflowPublishedVersion);
+  }, [
+    workflowProtoQuota,
+    workflowProtoHeaderUx,
+    workflowProtoLifecycle,
+    workflowCanvasIsAdvanced,
+    workflowPublishedVersion,
+  ]);
+
+  const saveDropdownRows = useMemo(() => {
+    if (workflowProtoIsViewer) return [];
+    if (isWorkflowHeaderOwner) {
+      return getOwnerSaveDropdownRows(
+        workflowProtoHeaderUx,
+        workflowProtoLifecycle,
+        workflowProtoQuota,
+        workflowPublishedVersion,
+        workflowCanvasIsAdvanced
+      );
+    }
+    return getOwnerSaveMenuBaseItems(
+      workflowProtoLifecycle,
+      workflowProtoQuota,
+      workflowPublishedVersion,
+      workflowCanvasIsAdvanced
+    );
+  }, [
+    workflowProtoIsViewer,
+    isWorkflowHeaderOwner,
+    workflowProtoHeaderUx,
+    workflowProtoLifecycle,
+    workflowProtoQuota,
+    workflowPublishedVersion,
+    workflowCanvasIsAdvanced,
+  ]);
+
+  function handleHeaderLiveToggle(nextActive: boolean) {
+    if (!isWorkflowHeaderOwner || workflowProtoHeaderUx !== "option1") return;
+    if (!nextActive) {
+      setWorkflowProtoLifecycle(
+        workflowProtoLifecycle === "active_draft" ? "inactive_draft" : "inactive"
+      );
+      return;
+    }
+    const turn = getTurnOnMenuItemForOwnerToolbar(
+      workflowProtoLifecycle,
+      workflowProtoQuota,
+      workflowPublishedVersion
+    );
+    if (!turn.isDisabled) {
+      setWorkflowProtoLifecycle(
+        workflowProtoLifecycle === "inactive_draft" ? "active_draft" : "active"
+      );
+    }
+  }
+
+  function handleSaveMenuAction(value: string) {
+    setWorkflowHeaderSaveMenuOpen(false);
+    if (headerStableLifecycleBlocksSaveSplit) {
+      if (
+        value === "publish" ||
+        value === "save_publish" ||
+        value === "save_draft" ||
+        value === "save"
+      ) {
+        return;
+      }
+    }
+    if (value === "save_publish") {
+      const ship = getOption2PublishRow(
+        workflowProtoLifecycle,
+        workflowProtoQuota,
+        workflowPublishedVersion,
+        workflowCanvasIsAdvanced
+      );
+      if (ship.disabled) return;
+      setWorkflowPublishedVersion((v) => v + 1);
+      return;
+    }
+    if (value === "save_draft") {
+      return;
+    }
+    if (value === "publish" && workflowProtoHeaderUx === "option2") {
+      const pub = getOption2PublishRow(
+        workflowProtoLifecycle,
+        workflowProtoQuota,
+        workflowPublishedVersion,
+        workflowCanvasIsAdvanced
+      );
+      if (pub.disabled) return;
+      setWorkflowPublishedVersion((v) => v + 1);
+      if (!isWorkflowLifecycleActive(workflowProtoLifecycle)) {
+        setWorkflowProtoLifecycle(
+          workflowProtoLifecycle === "inactive_draft" ? "active_draft" : "active"
+        );
+      }
+    }
+  }
+
+  function handleOption2PrimaryClick() {
+    if (workflowProtoHeaderUx !== "option2" || !isWorkflowHeaderOwner) return;
+    if (workflowProtoLifecycle === "active" || workflowProtoLifecycle === "inactive") {
+      return;
+    }
+    if (option2PrimaryLabel !== "Publish") return;
+    const pub = getOption2PublishRow(
+      workflowProtoLifecycle,
+      workflowProtoQuota,
+      workflowPublishedVersion,
+      workflowCanvasIsAdvanced
+    );
+    if (pub.disabled) return;
+    setWorkflowPublishedVersion((v) => v + 1);
+    if (!isWorkflowLifecycleActive(workflowProtoLifecycle)) {
+      setWorkflowProtoLifecycle(
+        workflowProtoLifecycle === "inactive_draft" ? "active_draft" : "active"
+      );
+    }
+  }
+
   const prevNonTriggerStepCountRef = useRef(0);
   useEffect(() => {
     const n = Math.max(0, workflowFlowSteps.length - 1);
@@ -280,16 +490,6 @@ export default function Home() {
     if (!id || id === WORKFLOW_TRIGGER_ID) return;
     setWorkflowFlowSteps((prev) => prev.filter((s) => s.id !== id));
     setSelectedCanvasStepId(null);
-  }
-
-  function handleRemoveAdvancedSteps() {
-    setWorkflowFlowSteps((prev) => {
-      const next = prev.filter((s) => !isWorkflowStepAdvancedTier(s));
-      setSelectedCanvasStepId((cur) =>
-        cur && next.some((s) => s.id === cur) ? cur : null
-      );
-      return next;
-    });
   }
 
   function handleWorkflowChatSubmit() {
@@ -1217,13 +1417,14 @@ For each category, determine if the employee is compliant or non-compliant based
   }
 
   return (
+    <TooltipProvider delayDuration={250}>
     <div className="h-screen w-screen overflow-hidden bg-[#f9f7f6] relative">
       {/* Header */}
       <div className="fixed top-0 left-0 right-0 z-50">
         {/* Top Bar */}
-        <div className="h-14 bg-[#4A0039] flex items-center justify-between px-4">
-          <div className="flex items-center gap-4">
-            <svg width="113" height="16" viewBox="0 0 113 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <div className="h-14 bg-[#4A0039] flex items-center justify-between gap-3 px-4">
+          <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-4">
+            <svg width="113" height="16" viewBox="0 0 113 16" fill="none" xmlns="http://www.w3.org/2000/svg" className="shrink-0">
               <path d="M3.07176 4.43636C3.07176 2.67636 2.17123 1.22182 0.488281 0H4.40041C5.77334 1.04727 6.61482 2.64727 6.61482 4.43636C6.61482 6.22545 5.77334 7.82545 4.40041 8.87273C5.67 9.39636 6.39338 10.6764 6.39338 12.5091V16H2.85032V12.5091C2.85032 10.7636 2.00884 9.54182 0.488281 8.87273C2.17123 7.65091 3.07176 6.19636 3.07176 4.43636ZM10.7484 4.43636C10.7484 2.67636 9.84786 1.22182 8.16491 0H12.077C13.45 1.04727 14.2914 2.64727 14.2914 4.43636C14.2914 6.22545 13.45 7.82545 12.077 8.87273C13.3466 9.39636 14.07 10.6764 14.07 12.5091V16H10.5269V12.5091C10.5269 10.7636 9.68547 9.54182 8.16491 8.87273C9.84786 7.65091 10.7484 6.19636 10.7484 4.43636ZM18.425 4.43636C18.425 2.67636 17.5245 1.22182 15.8415 0H19.7537C21.1266 1.04727 21.9681 2.64727 21.9681 4.43636C21.9681 6.22545 21.1266 7.82545 19.7537 8.87273C21.0233 9.39636 21.7466 10.6764 21.7466 12.5091V16H18.2036V12.5091C18.2036 10.7636 17.3621 9.54182 15.8415 8.87273C17.5245 7.65091 18.425 6.19636 18.425 4.43636Z" fill="white"/>
               <path d="M32.2866 13.0925H29.6406V2.90918H36.1392C39.2649 2.90918 40.8059 4.07282 40.8059 5.97827C40.8059 7.27282 40.0499 8.24736 38.6397 8.74191C40.0935 8.96009 40.7477 9.731 40.7477 11.1128V13.091H38.0727V11.2292C38.0727 10.0655 37.4912 9.60009 35.9647 9.60009H32.2866V13.091V13.0925ZM35.9938 4.39282H32.2866V8.11645H35.9647C37.3022 8.11645 38.1309 7.37463 38.1309 6.211C38.1309 5.04736 37.3604 4.39282 35.9938 4.39282" fill="white"/>
               <path d="M45.3998 2.90918H42.7539V13.0925H45.3998V2.90918Z" fill="white"/>
@@ -1234,8 +1435,60 @@ For each category, determine if the employee is compliant or non-compliant based
               <path d="M89.7114 6.31282V13.0925H87.9668V2.90918H89.9454L97.1563 9.68736V2.90918H98.9009V13.0925H96.9237L89.7114 6.31282Z" fill="white"/>
               <path d="M107.535 4.10201C105.02 4.10201 103.377 5.70201 103.377 8.08746C103.377 10.4729 104.948 11.8984 107.39 11.8984H107.564C108.393 11.8984 109.324 11.7238 110.181 11.4475V8.69837H105.907V7.24382H112.769V12.0293C111.344 12.7711 109.193 13.3529 107.448 13.3529H107.216C103.203 13.3529 100.615 11.2293 100.615 8.14564C100.615 5.06201 103.276 2.64746 107.361 2.64746H107.594C109.294 2.64746 111.243 3.18564 112.682 4.02928L111.926 5.26564C110.632 4.55292 109.091 4.10201 107.71 4.10201H107.535V4.10201Z" fill="white"/>
             </svg>
+            {currentPage === "Workflows" ? (
+              <div
+                className="flex min-w-0 max-w-full flex-nowrap items-center gap-1.5 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] md:flex-wrap md:overflow-visible md:pb-0 [&::-webkit-scrollbar]:hidden"
+                aria-label="Workflow prototype: header UX, role, lifecycle, quota"
+              >
+                <select
+                  value={workflowProtoHeaderUx}
+                  onChange={(e) =>
+                    setWorkflowProtoHeaderUx(e.target.value as WorkflowProtoHeaderUx)
+                  }
+                  className="max-w-[min(11rem,28vw)] rounded-md border border-white/25 bg-white/10 px-2 py-1.5 text-[11px] leading-tight text-white outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                >
+                  <option value="option1">Header UX · Option 1</option>
+                  <option value="option2">Header UX · Option 2</option>
+                </select>
+                <select
+                  value={workflowProtoRole}
+                  onChange={(e) => setWorkflowProtoRole(e.target.value as WorkflowProtoRole)}
+                  className="max-w-[min(9rem,24vw)] rounded-md border border-white/25 bg-white/10 px-2 py-1.5 text-[11px] leading-tight text-white outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                >
+                  <option value="wf_owner">WF owner</option>
+                  <option value="wf_collaborator">WF collaborator</option>
+                  <option value="wf_viewer">WF viewer</option>
+                </select>
+                <select
+                  value={workflowProtoLifecycle}
+                  onChange={(e) =>
+                    setWorkflowProtoLifecycle(e.target.value as WorkflowProtoLifecycle)
+                  }
+                  className="max-w-[min(11rem,28vw)] rounded-md border border-white/25 bg-white/10 px-2 py-1.5 text-[11px] leading-tight text-white outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                >
+                  <option value="inactive">Inactive</option>
+                  <option value="active">Active</option>
+                  <option value="inactive_draft">Inactive (draft)</option>
+                  <option value="active_draft">Active (draft)</option>
+                  <option value="draft_errors">Draft (with errors)</option>
+                  <option value="draft_clean">Draft (clean)</option>
+                </select>
+                <select
+                  value={workflowProtoQuota}
+                  onChange={(e) => setWorkflowProtoQuota(e.target.value as WorkflowProtoQuota)}
+                  className="max-w-[min(12rem,30vw)] rounded-md border border-white/25 bg-white/10 px-2 py-1.5 text-[11px] leading-tight text-white outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                >
+                  <option value="has_quota">Has quota</option>
+                  <option value="no_quota">Does not have quota</option>
+                </select>
+              </div>
+            ) : null}
           </div>
-          <div className="flex items-center gap-4 sm:gap-6">
+          <div className="flex shrink-0 items-center gap-4 sm:gap-6">
             {currentPage === "Workflows" && (
               <button
                 type="button"
@@ -1279,8 +1532,14 @@ For each category, determine if the employee is compliant or non-compliant based
         <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Navigation Bar - Workflows (Figma 1170:22109) — only spans main column, not assistant */}
-          <div className="flex h-[72px] min-h-[72px] shrink-0 items-center justify-between border-b border-[#e0dede] bg-white px-[18px] py-3">
-            <div className="flex min-w-0 flex-1 items-center gap-3">
+          <div
+            className="flex h-[72px] min-h-[72px] shrink-0 items-center justify-between border-b border-[#e0dede] bg-white px-[18px] py-3"
+            data-wf-prototype-header-ux={workflowProtoHeaderUx}
+            data-wf-prototype-role={workflowProtoRole}
+            data-wf-prototype-lifecycle={workflowProtoLifecycle}
+            data-wf-prototype-quota={workflowProtoQuota}
+          >
+            <div className="flex min-w-0 min-h-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
               <Button
                 type="button"
                 variant="ghost"
@@ -1290,220 +1549,256 @@ For each category, determine if the employee is compliant or non-compliant based
               >
                 <CloseIcon className="size-6" />
               </Button>
-              <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  {workflowTitleEditing ? (
-                    <input
-                      ref={workflowTitleInputRef}
-                      value={workflowTitleDraft}
-                      onChange={(e) => setWorkflowTitleDraft(e.target.value)}
-                      onBlur={commitWorkflowTitle}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          commitWorkflowTitle();
-                        }
-                        if (e.key === "Escape") {
+
+              {isWorkflowHeaderOwner && workflowProtoHeaderUx === "option1" ? (
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
+                  <div className="min-w-0">
+                    {workflowTitleEditing ? (
+                      <input
+                        ref={workflowTitleInputRef}
+                        value={workflowTitleDraft}
+                        onChange={(e) => setWorkflowTitleDraft(e.target.value)}
+                        onBlur={commitWorkflowTitle}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitWorkflowTitle();
+                          }
+                          if (e.key === "Escape") {
+                            setWorkflowTitleDraft(workflowTitle);
+                            setWorkflowTitleEditing(false);
+                          }
+                        }}
+                        className="min-w-[10rem] max-w-[min(20rem,40vw)] rounded border border-[#e0dede] bg-white px-2 py-1 text-[20px] leading-7 text-black outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                        }}
+                        aria-label="Workflow name"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="min-w-0 max-w-[min(20rem,50vw)] cursor-text truncate rounded border-0 bg-transparent px-0.5 text-left text-[20px] leading-7 text-black hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                        }}
+                        aria-label={`Workflow name: ${workflowTitle}. Click to edit.`}
+                        onClick={() => {
                           setWorkflowTitleDraft(workflowTitle);
-                          setWorkflowTitleEditing(false);
-                        }
-                      }}
-                      className="min-w-[10rem] max-w-[min(20rem,40vw)] rounded border border-[#e0dede] bg-white px-2 py-1 text-[20px] leading-7 text-black outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
-                      style={{
-                        fontFamily: "'Basel Grotesk', sans-serif",
-                        fontWeight: 535,
-                      }}
-                      aria-label="Workflow name"
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      className="min-w-0 max-w-[min(20rem,40vw)] cursor-text truncate rounded border-0 bg-transparent px-0.5 text-left text-[20px] leading-7 text-black hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
-                      style={{
-                        fontFamily: "'Basel Grotesk', sans-serif",
-                        fontWeight: 535,
-                      }}
-                      aria-label={`Workflow name: ${workflowTitle}. Click to edit.`}
-                      onClick={() => {
-                        setWorkflowTitleDraft(workflowTitle);
-                        setWorkflowTitleEditing(true);
-                      }}
-                    >
-                      {workflowTitle}
-                    </button>
-                  )}
-                  <div className="flex min-w-0 items-center gap-2">
-                    <TooltipProvider delayDuration={200}>
-                      <Tooltip disableHoverableContent={false}>
-                        <TooltipTrigger asChild>
-                          <span
-                            className={
-                              workflowTier === "Advanced"
-                                ? `${WORKFLOW_TIER_CHIP_CLASS_ADVANCED} cursor-help`
-                                : `${WORKFLOW_TIER_CHIP_CLASS_BASIC} cursor-help`
-                            }
-                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                            tabIndex={0}
-                            aria-label={
-                              workflowTier === "Advanced"
-                                ? isWorkflowBasicTriggerOption(workflowTriggerOptionId)
-                                  ? "Workflow tier Advanced. Hover for details, org Advanced usage, and optional actions."
-                                  : "Workflow tier Advanced. Hover for details, org Advanced usage, and optional actions."
-                                : "Workflow tier Basic. Hover or focus for tier rules and org Advanced workflow usage."
-                            }
-                          >
-                            {workflowTier}
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent
-                          side="bottom"
-                          align="start"
-                          className="max-w-[min(360px,calc(100vw-2rem))] p-0 pointer-events-auto"
-                        >
-                          <div className="px-3 py-2.5">
-                            <p
-                              className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-[#8c8888]"
-                              style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
-                            >
-                              Basic vs advanced
-                            </p>
-                            <p
-                              className="text-[12px] leading-[17px] text-[#595555]"
-                              style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                            >
-                              <span className="font-medium text-[#252528]">Basic</span> requires a{" "}
-                              <span className="font-medium text-[#252528]">Start date</span> trigger and
-                              non-trigger steps that are only{" "}
-                              <span className="font-medium text-[#252528]">Send an email</span>,{" "}
-                              <span className="font-medium text-[#252528]">Assign a task</span>, or a{" "}
-                              <span className="font-medium text-[#252528]">Run function</span> limited to
-                              email-or-task behavior. Anything else is{" "}
-                              <span className="font-medium text-[#252528]">Advanced</span>.
-                            </p>
-                            <div className="mt-3 border-t border-[#ebe9e9] pt-3">
-                              <p
-                                className="mb-2 text-[11px] font-medium uppercase tracking-wide text-[#8c8888]"
-                                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
-                              >
-                                Advanced workflows
-                              </p>
-                              <p
-                                className="mb-2 text-[12px] leading-[17px] text-[#595555]"
-                                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                              >
-                                <span className="font-medium text-[#252528]">
-                                  {ORG_ACTIVE_ADVANCED_WORKFLOWS}
-                                </span>{" "}
-                                of {ORG_ADVANCED_CHART_MAX} Advanced workflows active org-wide.
-                              </p>
-                              <div
-                                className="mb-2 flex h-2.5 w-full overflow-hidden rounded-full bg-[#eceae9]"
-                                role="img"
-                                aria-label={
-                                  workflowTier === "Advanced"
-                                    ? `Combined chart on scale 0–${ORG_ADVANCED_CHART_MAX}: ${ORG_ACTIVE_ADVANCED_WORKFLOWS} active today (solid), plus 1 projected (dashed)`
-                                    : `Chart on scale 0–${ORG_ADVANCED_CHART_MAX}: ${ORG_ACTIVE_ADVANCED_WORKFLOWS} active Advanced workflows`
-                                }
-                              >
-                                <div
-                                  className={cn(
-                                    "h-full shrink-0 bg-[#7A005D]/90 transition-[width] duration-300",
-                                    workflowTier === "Advanced" ? "rounded-l-full" : "rounded-full"
-                                  )}
-                                  style={{
-                                    width: `${(ORG_ACTIVE_ADVANCED_WORKFLOWS / ORG_ADVANCED_CHART_MAX) * 100}%`,
-                                  }}
-                                />
-                                {workflowTier === "Advanced" ? (
-                                  <div
-                                    className="h-full shrink-0 rounded-r-full border border-dashed border-[#7A005D] bg-[#d4b8cc]/90"
-                                    style={{
-                                      width: `${(1 / ORG_ADVANCED_CHART_MAX) * 100}%`,
-                                    }}
-                                    title="Projected +1 when this workflow is activated"
-                                  />
-                                ) : null}
-                              </div>
-                              <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-[14px] text-[#8c8888]">
-                                <span
-                                  className="inline-flex items-center gap-1.5"
-                                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                                >
-                                  <span
-                                    className="inline-block size-2 shrink-0 rounded-sm bg-[#7A005D]/90"
-                                    aria-hidden
-                                  />
-                                  Today
-                                </span>
-                                {workflowTier === "Advanced" ? (
-                                  <span
-                                    className="inline-flex items-center gap-1.5"
-                                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                                  >
-                                    <span
-                                      className="inline-block size-2 shrink-0 rounded-sm border border-dashed border-[#7A005D] bg-[#d4b8cc]/90"
-                                      aria-hidden
-                                    />
-                                    +1 if you activate ({ORG_ACTIVE_ADVANCED_WORKFLOWS + 1} total)
-                                  </span>
-                                ) : null}
-                              </div>
-                              {workflowTier === "Advanced" ? (
-                                <p
-                                  className="text-[12px] leading-[17px] text-[#595555]"
-                                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                                >
-                                  <span className="font-medium text-[#252528]">Advanced</span> draft—dashed
-                                  segment shows this workflow once it&apos;s live.
-                                </p>
-                              ) : (
-                                <p
-                                  className="text-[12px] leading-[17px] text-[#595555]"
-                                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-                                >
-                                  <span className="font-medium text-[#252528]">Basic</span> draft—activating
-                                  it won&apos;t add to the org Advanced count above.
-                                </p>
-                              )}
-                            </div>
-                            {workflowTier === "Advanced" ? (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                className="mt-3 h-9 w-full rounded-md border border-[#e0dede] bg-white px-3 text-[13px] text-[#252528] shadow-none hover:bg-[#f5f5f5]"
-                                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (isWorkflowBasicTriggerOption(workflowTriggerOptionId)) {
-                                    handleRemoveAdvancedSteps();
-                                  } else {
-                                    setTriggerSelectorInitialBrowse({
-                                      ...WORKFLOW_BASIC_START_DATE_BROWSE_PATH,
-                                    });
-                                    setWorkflowTriggerSelectorOpen(true);
-                                  }
-                                }}
-                              >
-                                {isWorkflowBasicTriggerOption(workflowTriggerOptionId)
-                                  ? "Remove advanced steps"
-                                  : "Use Basic trigger"}
-                              </Button>
-                            ) : null}
-                          </div>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                          setWorkflowTitleEditing(true);
+                        }}
+                      >
+                        {workflowTitle}
+                      </button>
+                    )}
                   </div>
+                  <WorkflowNoQuotaTooltip
+                    enabled={workflowProtoQuota === "no_quota"}
+                    body={option1NoQuotaTooltipBody}
+                  >
+                    <div
+                      className="flex shrink-0 items-center gap-2"
+                      title={
+                        workflowProtoQuota === "no_quota"
+                          ? undefined
+                          : ownerLiveBlockerTooltip ?? undefined
+                      }
+                    >
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isWorkflowLifecycleActive(workflowProtoLifecycle)}
+                        disabled={ownerLiveSwitchDisabled}
+                        onClick={() =>
+                          handleHeaderLiveToggle(
+                            !isWorkflowLifecycleActive(workflowProtoLifecycle)
+                          )
+                        }
+                        className={cn(
+                          "relative h-6 w-11 shrink-0 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40 disabled:cursor-not-allowed disabled:opacity-45",
+                          isWorkflowLifecycleActive(workflowProtoLifecycle)
+                            ? "bg-[#7A005D]"
+                            : "bg-[#d4d4d4]"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "pointer-events-none absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform",
+                            isWorkflowLifecycleActive(workflowProtoLifecycle) && "translate-x-5"
+                          )}
+                        />
+                      </button>
+                      <span
+                        className="text-[12px] tabular-nums text-[#595555]"
+                        id="workflow-header-published-version-label"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                      >
+                        v{workflowHeaderDisplayVersion}
+                      </span>
+                      {isWorkflowLifecycleActive(workflowProtoLifecycle) &&
+                      workflowCanvasIsAdvanced &&
+                      workflowProtoQuota === "no_quota" ? (
+                        <span
+                          className="max-w-[11rem] truncate text-[11px] leading-tight text-[#8c8888] sm:max-w-[14rem]"
+                          title={getActiveAdvancedDraftNoQuotaCopy(workflowPublishedVersion)}
+                          style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                        >
+                          · Prior publish live
+                        </span>
+                      ) : null}
+                    </div>
+                  </WorkflowNoQuotaTooltip>
                 </div>
-              </div>
+              ) : workflowProtoHeaderUx === "option2" ? (
+                <div className="flex min-w-0 flex-1 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                  <div className="min-w-0">
+                    {workflowTitleEditing ? (
+                      <input
+                        ref={workflowTitleInputRef}
+                        value={workflowTitleDraft}
+                        onChange={(e) => setWorkflowTitleDraft(e.target.value)}
+                        onBlur={commitWorkflowTitle}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitWorkflowTitle();
+                          }
+                          if (e.key === "Escape") {
+                            setWorkflowTitleDraft(workflowTitle);
+                            setWorkflowTitleEditing(false);
+                          }
+                        }}
+                        className="min-w-[10rem] max-w-[min(20rem,50vw)] rounded border border-[#e0dede] bg-white px-2 py-1 text-[20px] leading-7 text-black outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                        }}
+                        aria-label="Workflow name"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="min-w-0 max-w-[min(20rem,55vw)] cursor-text truncate rounded border-0 bg-transparent px-0.5 text-left text-[20px] leading-7 text-black hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                        }}
+                        aria-label={`Workflow name: ${workflowTitle}. Click to edit.`}
+                        onClick={() => {
+                          setWorkflowTitleDraft(workflowTitle);
+                          setWorkflowTitleEditing(true);
+                        }}
+                      >
+                        {workflowTitle}
+                      </button>
+                    )}
+                  </div>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded border px-2 py-0.5 text-[11px] font-medium leading-tight",
+                      option2LifecycleLabel.tone === "active" &&
+                        "border-emerald-200 bg-emerald-50 text-emerald-900",
+                      option2LifecycleLabel.tone === "inactive" &&
+                        "border-[#e0dede] bg-[#f9f7f6] text-[#595555]",
+                      option2LifecycleLabel.tone === "draft" &&
+                        "border-amber-200 bg-amber-50 text-amber-950"
+                    )}
+                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                    title={option2LifecycleLabel.text}
+                  >
+                    {option2LifecycleLabel.text}
+                  </span>
+                </div>
+              ) : (
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <div className="min-w-0">
+                    {workflowTitleEditing ? (
+                      <input
+                        ref={workflowTitleInputRef}
+                        value={workflowTitleDraft}
+                        onChange={(e) => setWorkflowTitleDraft(e.target.value)}
+                        onBlur={commitWorkflowTitle}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            commitWorkflowTitle();
+                          }
+                          if (e.key === "Escape") {
+                            setWorkflowTitleDraft(workflowTitle);
+                            setWorkflowTitleEditing(false);
+                          }
+                        }}
+                        className="min-w-[10rem] max-w-[min(20rem,50vw)] rounded border border-[#e0dede] bg-white px-2 py-1 text-[20px] leading-7 text-black outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                        }}
+                        aria-label="Workflow name"
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="min-w-0 max-w-[min(20rem,55vw)] cursor-text truncate rounded border-0 bg-transparent px-0.5 text-left text-[20px] leading-7 text-black hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#5aa5e7]/40"
+                        style={{
+                          fontFamily: "'Basel Grotesk', sans-serif",
+                          fontWeight: 535,
+                        }}
+                        aria-label={`Workflow name: ${workflowTitle}. Click to edit.`}
+                        onClick={() => {
+                          setWorkflowTitleDraft(workflowTitle);
+                          setWorkflowTitleEditing(true);
+                        }}
+                      >
+                        {workflowTitle}
+                      </button>
+                    )}
+                  </div>
+                  {!isWorkflowHeaderOwner ? (
+                    <span
+                      className={cn(
+                        "shrink-0 rounded px-2 py-0.5 text-[12px] font-medium leading-tight",
+                        isWorkflowLifecycleActive(workflowProtoLifecycle)
+                          ? "bg-emerald-50 text-emerald-800"
+                          : "bg-neutral-100 text-neutral-700"
+                      )}
+                      style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                    >
+                      {isWorkflowLifecycleActive(workflowProtoLifecycle) ? "Live" : "Off"}
+                    </span>
+                  ) : null}
+                </div>
+              )}
             </div>
-            <div className="ml-4 flex shrink-0 items-center gap-4 pl-4 sm:gap-6">
-              <p
-                className="hidden text-center text-[11px] leading-[13px] tracking-[0.25px] text-[#716f6c] sm:block whitespace-nowrap"
-                style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
-              >
-                Last published 3 months ago
-              </p>
+            <div className="ml-2 flex shrink-0 flex-wrap items-center justify-end gap-2 pl-2 sm:ml-4 sm:gap-4 sm:pl-4">
+              {workflowProtoLifecycle !== "draft_clean" &&
+              workflowProtoLifecycle !== "draft_errors" ? (
+                workflowProtoLifecycle === "active_draft" ||
+                workflowProtoLifecycle === "inactive_draft" ? (
+                  <div
+                    className="hidden items-center gap-1.5 text-[11px] leading-[13px] tracking-[0.25px] text-[#716f6c] lg:flex"
+                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                  >
+                    <span>Edited by</span>
+                    <div className="h-8 w-8 shrink-0 overflow-hidden rounded-full border border-[#c5c0bb] bg-neutral-200 shadow-[inset_0_0_0_0.5px_rgba(0,0,0,0.04)]">
+                      <img
+                        src="/images/workflow-avatar-alex-martinez.jpg"
+                        alt="Last editor"
+                        className="h-full w-full object-cover object-center"
+                        draggable={false}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <p
+                    className="hidden text-center text-[11px] leading-[13px] tracking-[0.25px] text-[#716f6c] lg:block whitespace-nowrap"
+                    style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                  >
+                    Last published 3 months ago
+                  </p>
+                )
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
@@ -1516,12 +1811,145 @@ For each category, determine if the employee is compliant or non-compliant based
               <div className="hidden h-6 w-px bg-[#e0dede] sm:block" aria-hidden />
               <Button
                 type="button"
-                className="h-10 gap-2 bg-[#7A005D] px-4 text-[15px] leading-[19px] tracking-[0.25px] text-white hover:bg-[#7A005D]/90"
+                variant="outline"
+                disabled={workflowProtoIsViewer}
+                className="h-10 border-[#d3d3d3] px-3 text-[15px] leading-[19px] tracking-[0.25px] text-[#252528] hover:bg-[#f5f5f5] disabled:opacity-40"
                 style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
               >
-                Save
-                <ChevronDown className="size-4 opacity-90" strokeWidth={2} />
+                Run test
               </Button>
+              {!workflowProtoIsViewer && isWorkflowHeaderOwner ? (
+                <Popover open={workflowHeaderSaveMenuOpen} onOpenChange={setWorkflowHeaderSaveMenuOpen}>
+                  <WorkflowNoQuotaTooltip
+                    enabled={
+                      workflowProtoHeaderUx === "option2" &&
+                      workflowProtoQuota === "no_quota"
+                    }
+                    triggerClassName="flex items-stretch"
+                  >
+                    <div className="flex items-stretch">
+                      <Button
+                        type="button"
+                        disabled={headerStableLifecycleBlocksSaveSplit}
+                        title={
+                          headerStableLifecycleBlocksSaveSplit
+                            ? "To save or publish from the header, choose Active (draft), Inactive (draft), or a draft in the top bar"
+                            : undefined
+                        }
+                        className="h-10 gap-1 rounded-l-md rounded-r-none border border-[#7A005D] border-r-0 bg-[#7A005D] px-3 text-[15px] leading-[19px] tracking-[0.25px] text-white hover:bg-[#7A005D]/90 sm:px-4 disabled:opacity-50"
+                        style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                        onClick={() => {
+                          if (
+                            workflowProtoHeaderUx === "option2" &&
+                            option2PrimaryLabel === "Publish"
+                          ) {
+                            handleOption2PrimaryClick();
+                          }
+                        }}
+                      >
+                        {workflowProtoHeaderUx === "option2"
+                          ? option2PrimaryLabel
+                          : "Save"}
+                      </Button>
+                      <PopoverTrigger asChild>
+                        <Button
+                          type="button"
+                          disabled={headerStableLifecycleBlocksSaveSplit}
+                          className="h-10 rounded-r-md rounded-l-none border border-[#7A005D] border-l-0 bg-[#7A005D] px-2 text-white hover:bg-[#7A005D]/90 disabled:opacity-50"
+                          aria-label="Save options"
+                          title={
+                            headerStableLifecycleBlocksSaveSplit
+                              ? "To save or publish from the header, choose Active (draft), Inactive (draft), or a draft in the top bar"
+                              : undefined
+                          }
+                        >
+                          <ChevronDown className="size-4 opacity-90" strokeWidth={2} />
+                        </Button>
+                      </PopoverTrigger>
+                    </div>
+                  </WorkflowNoQuotaTooltip>
+                  <PopoverContent align="end" className="w-[min(20rem,calc(100vw-2rem))] p-0">
+                    <div className="py-1" role="menu">
+                      {saveDropdownRows.map((row, i) =>
+                        row.type === "separator" ? (
+                          <div
+                            key={`sep-${i}`}
+                            className="my-1 h-px bg-[#e0dede]"
+                            role="separator"
+                          />
+                        ) : (
+                          (() => {
+                            const quotaPublishTooltip =
+                              workflowProtoQuota === "no_quota" &&
+                              row.value === "publish" &&
+                              Boolean(row.disabled);
+                            return (
+                              <WorkflowNoQuotaTooltip
+                                key={row.value + row.label}
+                                enabled={quotaPublishTooltip}
+                                triggerClassName="block w-full"
+                              >
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={row.disabled}
+                                  title={quotaPublishTooltip ? undefined : row.hint}
+                                  className="flex w-full flex-col items-start gap-0.5 px-3 py-2 text-left text-[13px] text-[#252528] hover:bg-[#f5f5f5] disabled:cursor-not-allowed disabled:opacity-40"
+                                  style={{
+                                    fontFamily: "'Basel Grotesk', sans-serif",
+                                    fontWeight: 430,
+                                  }}
+                                  onClick={() =>
+                                    !row.disabled && handleSaveMenuAction(row.value)
+                                  }
+                                >
+                                  <span className="font-medium">{row.label}</span>
+                                  {row.hint && !quotaPublishTooltip ? (
+                                    <span className="text-[11px] leading-snug text-[#8c8888]">
+                                      {row.hint}
+                                    </span>
+                                  ) : null}
+                                </button>
+                              </WorkflowNoQuotaTooltip>
+                            );
+                          })()
+                        )
+                      )}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              ) : (
+                <Button
+                  type="button"
+                  disabled={workflowProtoIsViewer}
+                  title={
+                    workflowProtoIsViewer
+                      ? "WF viewer: read-only in this prototype (matches WFchat)"
+                      : undefined
+                  }
+                  className="h-10 gap-2 bg-[#7A005D] px-4 text-[15px] leading-[19px] tracking-[0.25px] text-white hover:bg-[#7A005D]/90 disabled:pointer-events-none disabled:opacity-40"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                >
+                  Save
+                </Button>
+              )}
+              {workflowProtoHeaderUx === "option2" &&
+              isWorkflowHeaderOwner &&
+              isWorkflowLifecycleActive(workflowProtoLifecycle) ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 border-[#d3d3d3] px-3 text-[15px] leading-[19px] tracking-[0.25px] text-[#252528] hover:bg-[#f5f5f5]"
+                  style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                  onClick={() =>
+                    setWorkflowProtoLifecycle(
+                      workflowProtoLifecycle === "active_draft" ? "inactive_draft" : "inactive"
+                    )
+                  }
+                >
+                  Turn off
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 variant="ghost"
@@ -1549,31 +1977,19 @@ For each category, determine if the employee is compliant or non-compliant based
                 <div className="bg-[#e0dede] h-px mb-5" />
 
                 {catalogStepTierLabelsActive ? (
-                  <AddStepTierLegendParagraph className="mb-5" />
-                ) : null}
-
-                {ADD_STEP_CATALOG_GROUPS.filter((g) => g.category !== "Logic").map((group) => (
-                  <div key={group.category} className="mb-5">
+                  <div className="mb-5">
                     <p
                       className="text-[11px] font-medium text-[#8c8888] tracking-wide uppercase mb-2"
                       style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
                     >
-                      {group.category}
+                      Basic actions
                     </p>
                     <div className="space-y-2">
-                      {group.items.map((item) => {
-                        const tierBasic = isCatalogItemBasicTier(item.id);
-                        return (
+                      {getBasicActionCatalogItems().map((item) => (
                         <div
                           key={item.id}
                           draggable
-                          title={
-                            catalogStepTierLabelsActive
-                              ? tierBasic
-                                ? "Basic-tier: OK for a Basic workflow if you only add Send an email and Assign a task steps."
-                                : "Advanced-tier: adds or keeps this workflow as Advanced."
-                              : "With your current trigger, the workflow stays Advanced. Basic vs Advanced on steps only applies when the trigger is Start date."
-                          }
+                          title={`Drag to add ${item.label}`}
                           onDragStart={(e) => {
                             e.dataTransfer.setData(WORKFLOW_CATALOG_DRAG_MIME, item.id);
                             e.dataTransfer.setData("text/plain", item.id);
@@ -1597,20 +2013,61 @@ For each category, determine if the employee is compliant or non-compliant based
                           >
                             {item.label}
                           </span>
-                          {catalogStepTierLabelsActive && tierBasic ? (
-                            <span
-                              className={`pointer-events-none shrink-0 ${WORKFLOW_TIER_CHIP_CLASS_BASIC}`}
-                              style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                            >
-                              Basic
-                            </span>
-                          ) : null}
                         </div>
-                        );
-                      })}
+                      ))}
                     </div>
                   </div>
-                ))}
+                ) : null}
+
+                {ADD_STEP_CATALOG_GROUPS.filter((g) => g.category !== "Logic").map((group) => {
+                  const items =
+                    catalogStepTierLabelsActive && group.category === "Notifications"
+                      ? group.items.filter((i) => !WORKFLOW_BASIC_CATALOG_IDS.has(i.id))
+                      : group.items;
+                  if (items.length === 0) return null;
+                  return (
+                  <div key={group.category} className="mb-5">
+                    <p
+                      className="text-[11px] font-medium text-[#8c8888] tracking-wide uppercase mb-2"
+                      style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 535 }}
+                    >
+                      {group.category}
+                    </p>
+                    <div className="space-y-2">
+                      {items.map((item) => (
+                        <div
+                          key={item.id}
+                          draggable
+                          title={`Drag to add ${item.label}`}
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData(WORKFLOW_CATALOG_DRAG_MIME, item.id);
+                            e.dataTransfer.setData("text/plain", item.id);
+                            e.dataTransfer.effectAllowed = "copy";
+                            setCatalogDragActive(true);
+                          }}
+                          onDragEnd={() => setCatalogDragActive(false)}
+                          className="flex items-center gap-2 rounded-lg border border-[#e0dede] bg-white px-2 py-2 cursor-grab select-none transition-colors hover:border-[#c8c6c6] hover:bg-[#f9f7f6] active:cursor-grabbing"
+                        >
+                          <GripVertical
+                            className="size-4 shrink-0 text-[#a8a4a4] pointer-events-none"
+                            strokeWidth={2}
+                            aria-hidden
+                          />
+                          <div className="flex size-6 shrink-0 items-center justify-center pointer-events-none">
+                            {item.icon}
+                          </div>
+                          <span
+                            className="min-w-0 flex-1 text-sm text-[#252528] pointer-events-none"
+                            style={{ fontFamily: "'Basel Grotesk', sans-serif", fontWeight: 430 }}
+                          >
+                            {item.label}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  );
+                })}
               </div>
           </div>
 
@@ -1641,14 +2098,6 @@ For each category, determine if the employee is compliant or non-compliant based
                         <p className="min-w-0 flex-1 truncate text-sm font-medium text-black">
                           {workflowTriggerLabel}
                         </p>
-                        {isWorkflowBasicTriggerOption(workflowTriggerOptionId) ? (
-                          <span
-                            className={`${WORKFLOW_TIER_CHIP_CLASS_BASIC} shrink-0`}
-                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                          >
-                            Basic
-                          </span>
-                        ) : null}
                       </div>
                       <Button
                         type="button"
@@ -2792,14 +3241,6 @@ export async function onRipplingEvent(event, context) {
                         >
                           Workflow trigger
                         </p>
-                        {isWorkflowBasicTriggerOption(workflowTriggerOptionId) ? (
-                          <span
-                            className={`${WORKFLOW_TIER_CHIP_CLASS_BASIC} shrink-0`}
-                            style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                          >
-                            Basic
-                          </span>
-                        ) : null}
                       </div>
                       <p
                         className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
@@ -3006,18 +3447,6 @@ export async function onRipplingEvent(event, context) {
                             >
                               {step.runLabel}
                             </p>
-                            {catalogStepTierLabelsActive &&
-                            step.functionTier === "basic" ? (
-                              <span
-                                className={cn(
-                                  "pointer-events-none shrink-0",
-                                  WORKFLOW_TIER_CHIP_CLASS_BASIC
-                                )}
-                                style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                              >
-                                Basic
-                              </span>
-                            ) : null}
                           </div>
                           <p
                             className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
@@ -3036,7 +3465,6 @@ export async function onRipplingEvent(event, context) {
                         const cat = findCatalogItem(step.catalogItemId);
                         const dim =
                           selectedCanvasStepId !== null && selectedCanvasStepId !== step.id;
-                        const catalogBasic = isCatalogItemBasicTier(step.catalogItemId);
                         return (
                           <>
                             <div
@@ -3058,17 +3486,6 @@ export async function onRipplingEvent(event, context) {
                                 >
                                   {cat?.label ?? step.title}
                                 </p>
-                                {catalogStepTierLabelsActive && catalogBasic ? (
-                                  <span
-                                    className={cn(
-                                      "pointer-events-none shrink-0",
-                                      WORKFLOW_TIER_CHIP_CLASS_BASIC
-                                    )}
-                                    style={WORKFLOW_TIER_CHIP_FONT_STYLE}
-                                  >
-                                    Basic
-                                  </span>
-                                ) : null}
                               </div>
                               <p
                                 className="mt-0.5 line-clamp-2 break-words text-[14px] leading-[20px] text-[#252528]"
@@ -3696,5 +4113,6 @@ export async function onRipplingEvent(event, context) {
         </>
       )}
     </div>
+    </TooltipProvider>
   );
 }
